@@ -1,0 +1,68 @@
+{
+  "name": "flapwire",
+  "version": "0.0.0",
+  "description": "Local HTTP/HTTPS proxy that degrades traffic realistically for resilience testing.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "flapwire": "./dist/cli.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "biome check .",
+    "format": "biome format --write .",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "commander": "^12.1.0",
+    "picocolors": "^1.1.1"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
+    "@types/node": "^22.9.0",
+    "tsup": "^8.3.5",
+    "typescript": "^5.6.3",
+    "undici": "^6.21.0",
+    "vitest": "^2.1.5"
+  },
+  "keywords": [
+    "proxy",
+    "http",
+    "network",
+    "testing",
+    "resilience",
+    "chaos",
+    "latency",
+    "packet-loss"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/KeeganAI/flapwire.git"
+  },
+  "homepage": "https://github.com/KeeganAI/flapwire#readme",
+  "bugs": {
+    "url": "https://github.com/KeeganAI/flapwire/issues"
+  },
+  "author": "Lorenzo Rimi"
+}
