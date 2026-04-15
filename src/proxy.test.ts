@@ -321,6 +321,17 @@ describe("createReverseProxy", () => {
     expect(Date.now() - start).toBeGreaterThanOrEqual(110);
   });
 
+  it("rewrites the Host header to the upstream authority", async () => {
+    let observedHost: string | undefined;
+    const upstreamPort = await startUpstream((req, res) => {
+      observedHost = req.headers.host;
+      res.end("ok");
+    });
+    const proxyPort = await startReverse({}, { target: `http://127.0.0.1:${upstreamPort}` });
+    await directGet(proxyPort, "/");
+    expect(observedHost).toBe(`127.0.0.1:${upstreamPort}`);
+  });
+
   it("serves 504 during blackout", async () => {
     const upstreamPort = await startUpstream((_req, res) => res.end("ok"));
     let clock = 0;

@@ -100,7 +100,8 @@ async function runReverseSingle(
   target: string,
   explicitPort: number | null,
 ): Promise<void> {
-  const upstreamPort = new URL(target).port ? Number(new URL(target).port) : 80;
+  const targetUrl = new URL(target);
+  const upstreamPort = targetUrl.port ? Number(targetUrl.port) : 80;
   const preferred = explicitPort ?? deriveConventionalPort(upstreamPort);
   const server = createReverseProxy(profile, {
     target,

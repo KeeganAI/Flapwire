@@ -2,6 +2,11 @@
 
 All notable changes to Flapwire are recorded here. Hand-written.
 
+## [0.1.55] - 2026-04-15
+
+### Fixed
+- Reverse-proxy mode now rewrites the `Host` header to the upstream's authority before forwarding. Before this, virtual-hosted upstreams (Vercel, nginx, most CDNs) saw `Host: localhost:13000` and couldn't route the request. Node.js dev servers didn't notice because they don't look.
+
 ## [0.1.51] - 2026-04-15
 
 ### Fixed

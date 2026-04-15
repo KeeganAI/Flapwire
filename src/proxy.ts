@@ -95,13 +95,15 @@ async function handle(
     return;
   }
 
+  const hostAuthority = target.port === 80 ? target.hostname : `${target.hostname}:${target.port}`;
+  const upstreamHeaders = { ...clientReq.headers, host: hostAuthority };
   const upstreamReq = httpRequest(
     {
       hostname: target.hostname,
       port: target.port,
       method,
       path: target.path,
-      headers: clientReq.headers,
+      headers: upstreamHeaders,
     },
     (upstreamRes) => {
       const status = upstreamRes.statusCode ?? 502;
