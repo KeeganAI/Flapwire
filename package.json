@@ -53,11 +53,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/KeeganAI/flapwire.git"
+    "url": "git+https://github.com/KeeganAI/Flapwire.git"
   },
-  "homepage": "https://github.com/KeeganAI/flapwire#readme",
+  "homepage": "https://github.com/KeeganAI/Flapwire#readme",
   "bugs": {
-    "url": "https://github.com/KeeganAI/flapwire/issues"
+    "url": "https://github.com/KeeganAI/Flapwire/issues"
   },
   "author": "Lorenzo Rimi"
 }
