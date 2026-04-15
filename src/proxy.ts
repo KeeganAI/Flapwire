@@ -8,38 +8,66 @@ export interface ProxyProfile {
   loss?: LossConfig;
 }
 
+export type RequestOutcome = "response" | "drop" | "error";
+
+export interface RequestLog {
+  method: string;
+  url: string;
+  outcome: RequestOutcome;
+  status?: number;
+  appliedLatencyMs: number;
+}
+
+export interface ProxyOptions {
+  random?: () => number;
+  log?: (entry: RequestLog) => void;
+}
+
 const CONNECT_BODY =
   "HTTPS (CONNECT tunneling) is not supported in this build of Flapwire. " +
   "It is planned for v0.2. For now, proxy plain HTTP traffic or use reverse-proxy mode in v0.1.5.\n";
 
-export function createProxy(profile: ProxyProfile, random: () => number = Math.random): Server {
+export function createProxy(profile: ProxyProfile, options: ProxyOptions = {}): Server {
+  const random = options.random ?? Math.random;
+  const log = options.log ?? (() => {});
+
   const server = createServer(async (clientReq, clientRes) => {
+    const method = clientReq.method ?? "GET";
+    const url = clientReq.url ?? "";
+
     if (profile.loss && shouldDropConnection(profile.loss, random)) {
+      log({ method, url, outcome: "drop", appliedLatencyMs: 0 });
       clientReq.socket.destroy();
       return;
     }
 
-    if (profile.latency) {
-      await delay(sampleLatencyMs(profile.latency, random));
+    const appliedLatencyMs = profile.latency ? sampleLatencyMs(profile.latency, random) : 0;
+    if (appliedLatencyMs > 0) {
+      await delay(appliedLatencyMs);
     }
 
-    const target = new URL(clientReq.url ?? "");
+    const target = new URL(url);
     const upstreamReq = httpRequest(
       {
         hostname: target.hostname,
         port: target.port || 80,
-        method: clientReq.method,
+        method,
         path: `${target.pathname}${target.search}`,
         headers: clientReq.headers,
       },
       (upstreamRes) => {
-        clientRes.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers);
+        const status = upstreamRes.statusCode ?? 502;
+        clientRes.writeHead(status, upstreamRes.headers);
         upstreamRes.pipe(clientRes);
+        upstreamRes.on("end", () => {
+          log({ method, url, outcome: "response", status, appliedLatencyMs });
+        });
       },
     );
     upstreamReq.on("error", () => {
       clientRes.writeHead(502);
       clientRes.end();
+      log({ method, url, outcome: "error", status: 502, appliedLatencyMs });
     });
     clientReq.pipe(upstreamReq);
   });

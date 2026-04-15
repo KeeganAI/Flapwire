@@ -2,7 +2,26 @@
 import { Command } from "commander";
 import pc from "picocolors";
 import { PROFILE_NAMES, getProfile } from "./profiles.js";
-import { createProxy } from "./proxy.js";
+import { type RequestLog, createProxy } from "./proxy.js";
+
+function colorForStatus(status: number | undefined): (s: string) => string {
+  if (status === undefined) return pc.red;
+  if (status >= 500) return pc.red;
+  if (status >= 400) return pc.yellow;
+  if (status >= 300) return pc.cyan;
+  return pc.green;
+}
+
+function formatLog(entry: RequestLog): string {
+  const method = pc.bold(entry.method);
+  const url = entry.url;
+  if (entry.outcome === "drop") {
+    return `${method} ${url} ${pc.red("→ drop")}`;
+  }
+  const arrow = colorForStatus(entry.status)(`→ ${entry.status ?? "???"}`);
+  const timing = pc.dim(`(${Math.round(entry.appliedLatencyMs)}ms)`);
+  return `${method} ${url} ${arrow} ${timing}`;
+}
 
 const program = new Command();
 
@@ -26,7 +45,9 @@ program
       process.exit(1);
     }
 
-    const server = createProxy(profile);
+    const server = createProxy(profile, {
+      log: (entry) => console.log(formatLog(entry)),
+    });
     server.listen(port, () => {
       const lat = profile.latency;
       const loss = profile.loss;

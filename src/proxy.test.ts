@@ -5,7 +5,7 @@ import {
 } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
-import { createProxy } from "./proxy.js";
+import { type RequestLog, createProxy } from "./proxy.js";
 
 function listenRandom<
   S extends {
@@ -70,12 +70,58 @@ describe("createProxy", () => {
     return port;
   }
 
-  async function startProxy(profile: Parameters<typeof createProxy>[0]) {
-    const proxy = createProxy(profile);
+  async function startProxy(
+    profile: Parameters<typeof createProxy>[0],
+    options?: Parameters<typeof createProxy>[1],
+  ) {
+    const proxy = createProxy(profile, options);
     const port = await listenRandom(proxy);
     closers.push(() => new Promise<void>((r) => proxy.close(() => r())));
     return port;
   }
+
+  it("invokes the log callback with method, url, status, and applied latency on success", async () => {
+    const upstreamPort = await startUpstream((_req, res) => {
+      res.writeHead(200);
+      res.end("ok");
+    });
+    const logs: RequestLog[] = [];
+    const proxyPort = await startProxy(
+      { latency: { baseMs: 50, jitterMs: 0 } },
+      { log: (e) => logs.push(e) },
+    );
+
+    await requestThroughProxy(proxyPort, `http://127.0.0.1:${upstreamPort}/path?q=1`);
+
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toMatchObject({
+      method: "GET",
+      url: `http://127.0.0.1:${upstreamPort}/path?q=1`,
+      outcome: "response",
+      status: 200,
+    });
+    expect(logs[0]?.appliedLatencyMs).toBeGreaterThanOrEqual(40);
+  });
+
+  it("invokes the log callback with outcome 'drop' when the loss lever fires", async () => {
+    const upstreamPort = await startUpstream((_req, res) => res.end("never"));
+    const logs: RequestLog[] = [];
+    const proxyPort = await startProxy(
+      { loss: { connectionDropRate: 1 } },
+      { log: (e) => logs.push(e) },
+    );
+
+    await expect(
+      requestThroughProxy(proxyPort, `http://127.0.0.1:${upstreamPort}/`),
+    ).rejects.toThrow();
+
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toMatchObject({
+      method: "GET",
+      url: `http://127.0.0.1:${upstreamPort}/`,
+      outcome: "drop",
+    });
+  });
 
   it("forwards a GET request to upstream and returns the response body", async () => {
     const upstreamPort = await startUpstream((_req, res) => {
