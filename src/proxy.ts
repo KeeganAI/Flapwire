@@ -8,8 +8,12 @@ export interface ProxyProfile {
   loss?: LossConfig;
 }
 
+const CONNECT_BODY =
+  "HTTPS (CONNECT tunneling) is not supported in this build of Flapwire. " +
+  "It is planned for v0.2. For now, proxy plain HTTP traffic or use reverse-proxy mode in v0.1.5.\n";
+
 export function createProxy(profile: ProxyProfile, random: () => number = Math.random): Server {
-  return createServer(async (clientReq, clientRes) => {
+  const server = createServer(async (clientReq, clientRes) => {
     if (profile.loss && shouldDropConnection(profile.loss, random)) {
       clientReq.socket.destroy();
       return;
@@ -39,4 +43,15 @@ export function createProxy(profile: ProxyProfile, random: () => number = Math.r
     });
     clientReq.pipe(upstreamReq);
   });
+
+  server.on("connect", (_req, clientSocket) => {
+    clientSocket.on("error", () => {});
+    const bodyBytes = Buffer.byteLength(CONNECT_BODY);
+    clientSocket.write(
+      `HTTP/1.1 501 Not Implemented\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: ${bodyBytes}\r\nConnection: close\r\n\r\n${CONNECT_BODY}`,
+    );
+    clientSocket.end();
+  });
+
+  return server;
 }

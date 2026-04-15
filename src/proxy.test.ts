@@ -115,4 +115,68 @@ describe("createProxy", () => {
       requestThroughProxy(proxyPort, `http://127.0.0.1:${upstreamPort}/`),
     ).rejects.toThrow();
   });
+
+  it("rejects HTTPS CONNECT tunneling with 501 and a clear message", async () => {
+    const proxyPort = await startProxy({});
+
+    const result = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+      const req = httpRequest({
+        method: "CONNECT",
+        host: "127.0.0.1",
+        port: proxyPort,
+        path: "example.com:443",
+      });
+      req.on("connect", (res, socket, head) => {
+        const chunks: Buffer[] = [head];
+        socket.on("data", (c: Buffer) => chunks.push(c));
+        socket.on("end", () =>
+          resolve({
+            status: res.statusCode ?? 0,
+            body: Buffer.concat(chunks).toString("utf8"),
+          }),
+        );
+        socket.on("error", reject);
+      });
+      req.on("error", reject);
+      req.end();
+    });
+
+    expect(result.status).toBe(501);
+    expect(result.body).toMatch(/HTTPS/i);
+  });
+
+  it("does not crash the proxy process when a CONNECT client resets abruptly", async () => {
+    const proxyPort = await startProxy({});
+
+    await new Promise<void>((resolve, reject) => {
+      const req = httpRequest({
+        method: "CONNECT",
+        host: "127.0.0.1",
+        port: proxyPort,
+        path: "example.com:443",
+      });
+      req.on("connect", (_res, socket) => {
+        socket.destroy();
+        resolve();
+      });
+      req.on("error", reject);
+      req.end();
+    });
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    const ok = await new Promise<boolean>((resolve) => {
+      const probe = httpRequest({
+        method: "GET",
+        host: "127.0.0.1",
+        port: proxyPort,
+        path: "http://127.0.0.1:1/",
+      });
+      probe.on("response", () => resolve(true));
+      probe.on("error", () => resolve(true));
+      probe.end();
+    });
+
+    expect(ok).toBe(true);
+  });
 });
