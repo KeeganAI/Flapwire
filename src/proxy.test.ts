@@ -5,7 +5,7 @@ import {
 } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
-import { type RequestLog, createProxy } from "./proxy.js";
+import { type RequestLog, createProxy, createReverseProxy } from "./proxy.js";
 
 function listenRandom<
   S extends {
@@ -224,5 +224,112 @@ describe("createProxy", () => {
     });
 
     expect(ok).toBe(true);
+  });
+
+  it("returns 504 for new requests during a blackout window", async () => {
+    const upstreamPort = await startUpstream((_req, res) => {
+      res.writeHead(200);
+      res.end("ok");
+    });
+    let clock = 0;
+    const logs: RequestLog[] = [];
+    const proxyPort = await startProxy(
+      { blackout: { everySeconds: 10, durationSeconds: 5 } },
+      { now: () => clock, log: (e) => logs.push(e) },
+    );
+    clock = 6_000;
+    const result = await requestThroughProxy(proxyPort, `http://127.0.0.1:${upstreamPort}/`);
+    expect(result.status).toBe(504);
+    expect(logs[0]?.outcome).toBe("blackout");
+  });
+
+  it("passes through when the blackout window is not active", async () => {
+    const upstreamPort = await startUpstream((_req, res) => {
+      res.writeHead(200);
+      res.end("ok");
+    });
+    let clock = 0;
+    const proxyPort = await startProxy(
+      { blackout: { everySeconds: 10, durationSeconds: 2 } },
+      { now: () => clock },
+    );
+    clock = 1_000;
+    const result = await requestThroughProxy(proxyPort, `http://127.0.0.1:${upstreamPort}/`);
+    expect(result.status).toBe(200);
+    expect(result.body).toBe("ok");
+  });
+});
+
+describe("createReverseProxy", () => {
+  const closers: (() => Promise<void>)[] = [];
+
+  afterEach(async () => {
+    for (const close of closers) await close();
+    closers.length = 0;
+  });
+
+  async function startUpstream(
+    handler: (req: IncomingMessage, res: import("node:http").ServerResponse) => void,
+  ) {
+    const upstream = createHttpServer(handler);
+    const port = await listenRandom(upstream);
+    closers.push(() => new Promise<void>((r) => upstream.close(() => r())));
+    return port;
+  }
+
+  async function startReverse(
+    profile: Parameters<typeof createReverseProxy>[0],
+    options: Parameters<typeof createReverseProxy>[1],
+  ) {
+    const proxy = createReverseProxy(profile, options);
+    const port = await listenRandom(proxy);
+    closers.push(() => new Promise<void>((r) => proxy.close(() => r())));
+    return port;
+  }
+
+  function directGet(port: number, path: string): Promise<{ status: number; body: string }> {
+    return new Promise((resolve, reject) => {
+      const req = httpRequest({ host: "127.0.0.1", port, method: "GET", path }, async (res) => {
+        const body = await readBody(res);
+        resolve({ status: res.statusCode ?? 0, body });
+      });
+      req.on("error", reject);
+      req.end();
+    });
+  }
+
+  it("forwards a direct request to the configured target and returns its body", async () => {
+    const upstreamPort = await startUpstream((req, res) => {
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.end(`path=${req.url}`);
+    });
+    const proxyPort = await startReverse({}, { target: `http://127.0.0.1:${upstreamPort}` });
+    const r = await directGet(proxyPort, "/users/42?q=1");
+    expect(r.status).toBe(200);
+    expect(r.body).toBe("path=/users/42?q=1");
+  });
+
+  it("applies the latency lever", async () => {
+    const upstreamPort = await startUpstream((_req, res) => res.end("ok"));
+    const proxyPort = await startReverse(
+      { latency: { baseMs: 120, jitterMs: 0 } },
+      { target: `http://127.0.0.1:${upstreamPort}` },
+    );
+    const start = Date.now();
+    const r = await directGet(proxyPort, "/");
+    expect(r.body).toBe("ok");
+    expect(Date.now() - start).toBeGreaterThanOrEqual(110);
+  });
+
+  it("serves 504 during blackout", async () => {
+    const upstreamPort = await startUpstream((_req, res) => res.end("ok"));
+    let clock = 0;
+    const proxyPort = await startReverse(
+      { blackout: { everySeconds: 10, durationSeconds: 5 } },
+      { target: `http://127.0.0.1:${upstreamPort}`, now: () => clock },
+    );
+    clock = 6_000;
+    const r = await directGet(proxyPort, "/");
+    expect(r.status).toBe(504);
   });
 });

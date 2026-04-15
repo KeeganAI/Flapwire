@@ -13,6 +13,11 @@ export const PROFILES = {
     latency: { baseMs: 150, jitterMs: 300 },
     loss: { connectionDropRate: 0.02 },
   },
+  "train-wifi": {
+    latency: { baseMs: 500, jitterMs: 400 },
+    loss: { connectionDropRate: 0.02 },
+    blackout: { everySeconds: 60, durationSeconds: 4 },
+  },
 } as const satisfies Record<string, ProxyProfile>;
 
 export type ProfileName = keyof typeof PROFILES;
