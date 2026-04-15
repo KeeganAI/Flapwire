@@ -158,10 +158,14 @@ async function runReverseRoutes(
 }
 
 function registerShutdown(servers: Server[]): void {
+  let shuttingDown = false;
   const shutdown = () => {
+    if (shuttingDown) process.exit(1);
+    shuttingDown = true;
     let remaining = servers.length;
     if (remaining === 0) process.exit(0);
     for (const s of servers) {
+      s.closeAllConnections();
       s.close(() => {
         remaining -= 1;
         if (remaining === 0) process.exit(0);

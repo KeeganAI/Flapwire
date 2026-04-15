@@ -2,6 +2,11 @@
 
 All notable changes to Flapwire are recorded here. Hand-written.
 
+## [0.1.51] - 2026-04-15
+
+### Fixed
+- `Ctrl+C` now actually stops the proxy. Previously `server.close()` waited for HTTP keep-alive connections (typical of any browser client) to drain on their own, so the CLI appeared to hang on SIGINT. Open sockets are now closed immediately; a second SIGINT forces exit.
+
 ## [0.1.5] - 2026-04-15
 
 ### Added
