@@ -1,6 +1,6 @@
 {
   "name": "flapwire",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Local HTTP/HTTPS proxy that degrades traffic realistically for resilience testing.",
   "license": "MIT",
   "type": "module",
@@ -8,10 +8,10 @@
     "node": ">=22"
   },
   "bin": {
-    "flapwire": "./dist/cli.js"
+    "flapwire": "dist/cli.js"
   },
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",

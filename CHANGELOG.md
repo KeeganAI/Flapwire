@@ -2,7 +2,7 @@
 
 All notable changes to Flapwire are recorded here. Hand-written.
 
-## [Unreleased]
+## [0.1.0] - 2026-04-15
 
 ### Added
 - Forward HTTP proxy (explicit-proxy mode: `curl -x http://127.0.0.1:PORT ...`, or `HTTP_PROXY=...`).

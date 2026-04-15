@@ -1,72 +1,51 @@
 # Flapwire
 
-Local HTTP proxy that degrades traffic — latency, jitter, simulated packet loss — so you can see how your app behaves under bad network conditions.
-
-> **Status:** pre-release, not on npm yet. The commands below assume you cloned the repo.
-
-## What works today
-
-- Explicit HTTP proxy on a local port.
-- Latency lever: configurable base delay plus uniform jitter.
-- Loss lever: probabilistic connection drop (the proxy destroys the client socket; from the caller's perspective it looks like a reset).
-- Three built-in profiles: `fast-3g`, `slow-3g`, `flaky-wifi`.
-
-HTTPS, an admin UI, external profiles, and CI helpers are not in this build.
-
-## Run from source
-
-Requires Node >= 22.
+Local HTTP proxy that degrades traffic on purpose — jittered latency, random connection drops — so you can see what breaks before production does.
 
 ```sh
-git clone https://github.com/KeeganAI/flapwire.git
-cd flapwire
-npm install
-npm run build
-```
-
-Start the proxy:
-
-```sh
-node dist/cli.js --profile slow-3g --port 8080
-```
-
-Send HTTP traffic through it (in another terminal):
-
-```sh
+npx flapwire --profile slow-3g
+# then, in another terminal:
 curl -x http://127.0.0.1:8080 http://example.com/
 ```
 
-Stop with `Ctrl-C`.
+The proxy logs each request it passes:
 
-## Commands
-
-```sh
-node dist/cli.js [--profile <name>] [--port <number>]
+```
+GET http://example.com/ → 200 (412ms)
+GET http://example.com/favicon.ico → drop
 ```
 
-| Option            | Default   | Description                                                 |
-| ----------------- | --------- | ----------------------------------------------------------- |
-| `--profile`, `-p` | `slow-3g` | One of `fast-3g`, `slow-3g`, `flaky-wifi`.                  |
-| `--port`          | `8080`    | Local port the proxy listens on.                            |
+## Profiles
 
-### Built-in profiles
+| Name         | Latency (base ± σ) | Connection drop rate |
+| ------------ | ------------------ | -------------------- |
+| `fast-3g`    | 100ms ± 50ms       | 0%                   |
+| `slow-3g`    | 400ms ± 200ms      | 0.5%                 |
+| `flaky-wifi` | 150ms ± 300ms      | 2%                   |
 
-| Name         | Latency (base ± jitter) | Connection drop rate |
-| ------------ | ----------------------- | -------------------- |
-| `fast-3g`    | 100ms ± 50ms            | 0%                   |
-| `slow-3g`    | 400ms ± 200ms           | 0.5%                 |
-| `flaky-wifi` | 150ms ± 300ms           | 2%                   |
+Latency uses a normal distribution — `jitterMs` is the standard deviation, not a uniform half-range. Real networks look more like this than "always 400ms".
 
-## Development
+## Options
 
 ```sh
-npm test          # vitest run
-npm run lint      # biome check
-npm run typecheck # tsc --noEmit
-npm run build     # tsup
+flapwire [--profile <name>] [--port <number>]
 ```
 
-Tests are co-located with sources as `*.test.ts`.
+- `--profile`, `-p` — one of `fast-3g`, `slow-3g`, `flaky-wifi`. Default: `slow-3g`.
+- `--port` — local port to listen on. Default: `8080`.
+
+## Why not ...
+
+- **Chrome DevTools throttling** — lives in the browser, can't be scripted, applies a flat delay. Fine for one manual check; not usable in CI or for non-browser clients.
+- **Playwright / Cypress network emulation** — same browser-only limitation, no real jitter or loss.
+- **`tc` / `netem`** — kernel-level, far more powerful, Linux-only without contortions, steep learning curve. If you need packet-level fidelity, reach for `tc`.
+- **toxiproxy** — closest neighbour. More features, more configurability, a running daemon and its own config format. Flapwire is deliberately smaller.
+
+## Not in this release
+
+HTTPS is not supported. CONNECT requests are rejected with `501 Not Implemented` and a message that says so.
+
+No bandwidth throttling, external YAML profiles, admin API, UI, or CI helpers yet.
 
 ## License
 
