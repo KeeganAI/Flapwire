@@ -2,6 +2,12 @@
 
 All notable changes to Flapwire are recorded here. Hand-written.
 
+## [0.1.56] - 2026-04-18
+
+### Fixed
+- Writes to the client socket after `await delay()` are now guarded against the socket being already destroyed (e.g. by the blackout reaper tearing down connections mid-request). Previously this could throw an unhandled error in the `blackout` and "no upstream" paths.
+- `--help` no longer shows `(default: "")` for `--port` or `(default: [])` for `--route`.
+
 ## [0.1.55] - 2026-04-15
 
 ### Fixed

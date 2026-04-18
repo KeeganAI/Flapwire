@@ -79,7 +79,7 @@ async function handle(
   }
 
   if (blackoutNow) {
-    if (!clientRes.headersSent) {
+    if (!clientRes.headersSent && !clientRes.socket?.destroyed) {
       clientRes.writeHead(504, { "Content-Type": "text/plain; charset=utf-8" });
       clientRes.end("Gateway Timeout (blackout)\n");
     }
@@ -89,8 +89,10 @@ async function handle(
 
   const target = deps.resolveUpstream(clientReq);
   if (!target) {
-    clientRes.writeHead(502, { "Content-Type": "text/plain; charset=utf-8" });
-    clientRes.end("Bad Gateway\n");
+    if (!clientRes.headersSent && !clientRes.socket?.destroyed) {
+      clientRes.writeHead(502, { "Content-Type": "text/plain; charset=utf-8" });
+      clientRes.end("Bad Gateway\n");
+    }
     deps.log({ method, url, outcome: "error", status: 502, appliedLatencyMs });
     return;
   }

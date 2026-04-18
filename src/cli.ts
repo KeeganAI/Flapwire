@@ -183,7 +183,7 @@ program
   .name("flapwire")
   .description("Local HTTP proxy that degrades traffic for resilience testing.")
   .option("-p, --profile <name>", `network profile (${PROFILE_NAMES.join(", ")})`, "slow-3g")
-  .option("--port <number>", "port to listen on (forward / single reverse)", "")
+  .option("--port <number>", "port to listen on (forward / single reverse)")
   .option("--target <url>", "single reverse-proxy upstream (http://host:port)")
   .option(
     "--route <mapping>",
@@ -192,9 +192,8 @@ program
       previous.push(value);
       return previous;
     },
-    [] as string[],
   )
-  .action(async (opts: { profile: string; port: string; target?: string; route: string[] }) => {
+  .action(async (opts: { profile: string; port?: string; target?: string; route?: string[] }) => {
     let profile: ProxyProfile;
     try {
       profile = getProfile(opts.profile);
@@ -203,7 +202,7 @@ program
       process.exit(1);
     }
 
-    const usingRoutes = opts.route.length > 0;
+    const usingRoutes = (opts.route?.length ?? 0) > 0;
     const usingTarget = typeof opts.target === "string" && opts.target.length > 0;
 
     if (usingTarget && usingRoutes) {
@@ -213,7 +212,7 @@ program
 
     try {
       if (usingRoutes) {
-        const routes = opts.route.map(parseRoute);
+        const routes = (opts.route ?? []).map(parseRoute);
         await runReverseRoutes(profile, opts.profile, routes);
         return;
       }
