@@ -161,11 +161,15 @@ async function runReverseRoutes(
 function registerShutdown(servers: Server[]): void {
   let shuttingDown = false;
   const shutdown = () => {
+    // Second Ctrl+C bails immediately — users shouldn't have to guess whether
+    // the first one was heard.
     if (shuttingDown) process.exit(1);
     shuttingDown = true;
     let remaining = servers.length;
     if (remaining === 0) process.exit(0);
     for (const s of servers) {
+      // close() on its own waits for HTTP keep-alive sockets (every browser
+      // will have some) to drain. closeAllConnections() forces them shut now.
       s.closeAllConnections();
       s.close(() => {
         remaining -= 1;

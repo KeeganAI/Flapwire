@@ -4,6 +4,7 @@ import {
   request as httpRequest,
 } from "node:http";
 import type { AddressInfo } from "node:net";
+import type { Socket } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { type RequestLog, createProxy, createReverseProxy } from "./proxy.js";
 
@@ -283,7 +284,13 @@ describe("createReverseProxy", () => {
   ) {
     const proxy = createReverseProxy(profile, options);
     const port = await listenRandom(proxy);
-    closers.push(() => new Promise<void>((r) => proxy.close(() => r())));
+    closers.push(
+      () =>
+        new Promise<void>((r) => {
+          proxy.closeAllConnections();
+          proxy.close(() => r());
+        }),
+    );
     return port;
   }
 
@@ -342,5 +349,106 @@ describe("createReverseProxy", () => {
     clock = 6_000;
     const r = await directGet(proxyPort, "/");
     expect(r.status).toBe(504);
+  });
+
+  function startUpstreamWithUpgrade(): Promise<{ port: number; close: () => Promise<void> }> {
+    return new Promise((resolve) => {
+      const upgraded = new Set<Socket>();
+      const server = createHttpServer((_req, res) => res.end("ok"));
+      server.on("upgrade", (_req: IncomingMessage, socket: Socket) => {
+        upgraded.add(socket);
+        socket.on("close", () => upgraded.delete(socket));
+        socket.write(
+          "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+        );
+      });
+      server.listen(0, "127.0.0.1", () => {
+        const port = (server.address() as AddressInfo).port;
+        resolve({
+          port,
+          close: () =>
+            new Promise<void>((r) => {
+              for (const s of upgraded) s.destroy();
+              upgraded.clear();
+              server.closeAllConnections();
+              server.close(() => r());
+            }),
+        });
+      });
+    });
+  }
+
+  function sendUpgrade(
+    proxyPort: number,
+    path: string,
+  ): Promise<{ status: number; socket: Socket }> {
+    return new Promise((resolve, reject) => {
+      const req = httpRequest({
+        host: "127.0.0.1",
+        port: proxyPort,
+        method: "GET",
+        path,
+        headers: {
+          Connection: "Upgrade",
+          Upgrade: "websocket",
+          "Sec-WebSocket-Version": "13",
+          "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==",
+        },
+      });
+      req.on("upgrade", (res, socket) => resolve({ status: res.statusCode ?? 0, socket }));
+      req.on("error", reject);
+      req.end();
+    });
+  }
+
+  it("forwards WebSocket upgrade to upstream and returns 101", async () => {
+    const upstream = await startUpstreamWithUpgrade();
+    closers.push(upstream.close);
+    const proxyPort = await startReverse({}, { target: `http://127.0.0.1:${upstream.port}` });
+
+    const { status, socket } = await sendUpgrade(proxyPort, "/_ws");
+    socket.destroy();
+
+    expect(status).toBe(101);
+  });
+
+  it("drops WebSocket upgrade when loss lever fires", async () => {
+    const upstream = await startUpstreamWithUpgrade();
+    closers.push(upstream.close);
+    const proxyPort = await startReverse(
+      { loss: { connectionDropRate: 1 } },
+      { target: `http://127.0.0.1:${upstream.port}` },
+    );
+
+    await expect(sendUpgrade(proxyPort, "/")).rejects.toThrow();
+  });
+
+  it("logs WebSocket upgrade with outcome response and status 101", async () => {
+    const upstream = await startUpstreamWithUpgrade();
+    closers.push(upstream.close);
+    const logs: RequestLog[] = [];
+    const proxyPort = await startReverse(
+      {},
+      { target: `http://127.0.0.1:${upstream.port}`, log: (e) => logs.push(e) },
+    );
+
+    const { socket } = await sendUpgrade(proxyPort, "/chat");
+    socket.destroy();
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(logs[0]).toMatchObject({ outcome: "response", status: 101, url: "/chat" });
+  });
+
+  it("destroys WebSocket upgrade socket during blackout", async () => {
+    const upstream = await startUpstreamWithUpgrade();
+    closers.push(upstream.close);
+    let clock = 0;
+    const proxyPort = await startReverse(
+      { blackout: { everySeconds: 10, durationSeconds: 5 } },
+      { target: `http://127.0.0.1:${upstream.port}`, now: () => clock },
+    );
+    clock = 6_000;
+
+    await expect(sendUpgrade(proxyPort, "/")).rejects.toThrow();
   });
 });

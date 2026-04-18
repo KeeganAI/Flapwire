@@ -1,6 +1,10 @@
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 
+// Reverse-proxy listen ports are the upstream port with a "1" prefixed
+// (3000 → 13000, 5173 → 15173). Easy to remember, obviously not the upstream.
+// Returns null when the derived port won't fit in a u16 so the caller can pick
+// a random free port instead.
 export function deriveConventionalPort(upstreamPort: number): number | null {
   if (!Number.isInteger(upstreamPort) || upstreamPort <= 0 || upstreamPort > 65535) {
     return null;
@@ -15,6 +19,9 @@ export interface ListenResult {
   fallback: boolean;
 }
 
+// Listens on `preferred`, or falls back to a random free port if that one is
+// taken or permission-denied. The caller gets back which port was actually used
+// and whether we had to fall back, so the CLI can surface the difference.
 export function listenPreferred(
   server: Server,
   preferred: number | null,

@@ -2,6 +2,15 @@
 
 All notable changes to Flapwire are recorded here. Hand-written.
 
+## [0.1.6] - 2026-04-18
+
+### Added
+- Reverse-proxy mode now forwards HTTP `Upgrade` handshakes — the same mechanism browsers use to open WebSockets. Until now, any upgrade (Next.js HMR, Vite HMR, Socket.IO, a hand-rolled WebSocket client) would just hang on the proxy. The handshake is piped to the upstream and the raw sockets are bridged in both directions.
+- The three levers apply to WebSocket upgrades the same way they apply to HTTP: latency delays the handshake, the loss lever can drop the upgrade attempt, and a blackout tears the handshake down instead of answering it.
+
+### Changed
+- README now has a dedicated "How the levers work" section spelling out exactly what `latency`, `drop`, and `blackout` do given their config values — including the fact that latency is Gaussian (so `jitterMs` is the standard deviation, not a half-range) and that blackouts fire at the *end* of each cycle.
+
 ## [0.1.56] - 2026-04-18
 
 ### Fixed

@@ -12,7 +12,7 @@ curl -x http://127.0.0.1:8080 http://example.com/
 
 ## Reverse proxy
 
-Point your app at Flapwire instead of the upstream and it'll degrade on the way through — no browser proxy config, no `/etc/hosts`, no flags.
+Point your app at Flapwire instead of the upstream and it'll degrade on the way through — no browser proxy config, no `/etc/hosts`, no flags. Plain HTTP requests and WebSocket upgrades (e.g. Next.js / Vite HMR) are both forwarded, and the same levers apply to the WebSocket handshake.
 
 Single target:
 
@@ -50,9 +50,17 @@ GET /api/me → 504 blackout (380ms)
 | `flaky-wifi` | 150ms ± 300ms      | 2%        | —                |
 | `train-wifi` | 500ms ± 400ms      | 2%        | 4s every 60s     |
 
-Latency uses a normal distribution — `jitterMs` is the standard deviation, not a uniform half-range. Real networks look more like this than "always 400ms".
+## How the levers work
 
-Blackout means the proxy stops forwarding for a few seconds: existing connections are dropped, new requests get `504` (still after the profile's latency, so the stall feels real).
+Each profile is a mix of three independent levers.
+
+**Latency** — every request is delayed by a sample drawn from a normal distribution centred on `baseMs` with standard deviation `jitterMs`, clamped to zero. Roughly 68% of samples fall within `baseMs ± jitterMs`, 95% within `±2 × jitterMs`. The delay is applied before the response is written, so the client experiences it as time-to-first-byte — exactly what happens on a real slow link.
+
+**Drop** — before latency kicks in, each incoming connection is independently discarded with probability `connectionDropRate` (a value between 0 and 1). "Discarded" here means the TCP socket is destroyed with no response at all, the way a client would see a packet-loss or RST event from the network.
+
+**Blackout** — windows where the proxy stops forwarding entirely. `everySeconds` is the cycle length, `durationSeconds` is how much of each cycle the blackout covers. The blackout lands at the *end* of every cycle: for the last `durationSeconds` of each window, existing connections are torn down and new requests are answered with `504 Gateway Timeout` — after the profile's latency, so the stall feels like a real upstream going unreachable rather than an instant reset. WebSocket upgrade attempts during a blackout are refused the same way: the TCP socket is closed.
+
+A lever with no configured value is simply inactive: no latency, no drops, or no blackout cycle at all.
 
 ## Options
 

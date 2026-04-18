@@ -1,6 +1,6 @@
 {
   "name": "flapwire",
-  "version": "0.1.56",
+  "version": "0.1.6",
   "description": "Local HTTP/HTTPS proxy that degrades traffic realistically for resilience testing.",
   "license": "MIT",
   "type": "module",
