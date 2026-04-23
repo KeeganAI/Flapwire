@@ -5,8 +5,11 @@ import {
   createServer,
   request as httpRequest,
 } from "node:http";
+import { request as httpsRequest } from "node:https";
 import type { Socket } from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
+import { TLSSocket } from "node:tls";
+import type { CertStore } from "./cert.js";
 import { type BlackoutConfig, isInBlackout } from "./levers/blackout.js";
 import { type LatencyConfig, sampleLatencyMs } from "./levers/latency.js";
 import { type LossConfig, shouldDropConnection } from "./levers/loss.js";
@@ -31,17 +34,24 @@ export interface ProxyOptions {
   random?: () => number;
   log?: (entry: RequestLog) => void;
   now?: () => number;
+  // When set, CONNECT requests (browser HTTPS) are terminated with a leaf cert
+  // from this store instead of being rejected with 501. The browser has to
+  // trust the store's CA first (`flapwire trust`) — otherwise every site throws.
+  certStore?: CertStore;
+  // PEM of an additional CA to trust when making TLS requests to the upstream.
+  // Useful for dev setups whose upstream serves a self-signed cert. Adds to
+  // the system trust store, doesn't replace it.
+  upstreamCa?: string;
 }
 
 export interface UpstreamTarget {
   hostname: string;
   port: number;
   path: string;
+  // true when the upstream speaks TLS — set only for the CONNECT-tunnelled
+  // HTTPS path. Plain HTTP proxying leaves it undefined.
+  tls?: boolean;
 }
-
-const CONNECT_BODY =
-  "HTTPS (CONNECT tunneling) is not supported in this build of Flapwire. " +
-  "It is planned for v0.2. For now, proxy plain HTTP traffic or use reverse-proxy mode.\n";
 
 interface HandlerDeps {
   profile: ProxyProfile;
@@ -51,6 +61,7 @@ interface HandlerDeps {
   startedAt: number;
   resolveUpstream: (req: IncomingMessage) => UpstreamTarget | null;
   logUrl: (req: IncomingMessage) => string;
+  upstreamCa?: string;
 }
 
 async function handle(
@@ -106,16 +117,23 @@ async function handle(
 
   // Virtual-hosted upstreams (Vercel, nginx, most CDNs) route by the Host header.
   // The incoming request's Host points at Flapwire, so we rewrite it to the upstream's
-  // authority. Port 80 is omitted to match what a browser would send.
-  const hostAuthority = target.port === 80 ? target.hostname : `${target.hostname}:${target.port}`;
+  // authority. The default scheme port (80/443) is omitted to match what a browser sends.
+  const defaultPort = target.tls ? 443 : 80;
+  const hostAuthority =
+    target.port === defaultPort ? target.hostname : `${target.hostname}:${target.port}`;
   const upstreamHeaders = { ...clientReq.headers, host: hostAuthority };
-  const upstreamReq = httpRequest(
+  // https.request checks the upstream's certificate against the system trust
+  // store, same as any browser — we're not lowering security to terminate TLS
+  // on our side.
+  const makeRequest = target.tls ? httpsRequest : httpRequest;
+  const upstreamReq = makeRequest(
     {
       hostname: target.hostname,
       port: target.port,
       method,
       path: target.path,
       headers: upstreamHeaders,
+      ...(target.tls && deps.upstreamCa ? { ca: deps.upstreamCa } : {}),
     },
     (upstreamRes) => {
       const status = upstreamRes.statusCode ?? 502;
@@ -166,19 +184,129 @@ function attachBlackoutReaper(
   server.on("close", () => clearInterval(tick));
 }
 
-// CONNECT is how HTTP proxies tunnel HTTPS. We don't support that yet, but the
-// default Node server behaviour (silently dropping the request) is confusing —
-// the client just sees a closed socket. A 501 with a pointer to reverse-proxy
-// mode is friendlier. Written as a raw HTTP/1.1 response because Node doesn't
-// give you a ServerResponse for CONNECT.
+// Without a cert store we can't terminate TLS, so CONNECT gets a polite 501
+// instead of a silent close. Replaced at runtime by attachHttpsConnect when
+// the caller provides a certStore.
+const CONNECT_NOT_SUPPORTED =
+  "HTTPS (CONNECT tunneling) is not enabled in this Flapwire run. " +
+  "Start the proxy with a cert store, or use reverse-proxy mode.\n";
+
 function rejectConnect(server: Server): void {
   server.on("connect", (_req, clientSocket) => {
     clientSocket.on("error", () => {});
-    const bodyBytes = Buffer.byteLength(CONNECT_BODY);
+    const bodyBytes = Buffer.byteLength(CONNECT_NOT_SUPPORTED);
     clientSocket.write(
-      `HTTP/1.1 501 Not Implemented\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: ${bodyBytes}\r\nConnection: close\r\n\r\n${CONNECT_BODY}`,
+      `HTTP/1.1 501 Not Implemented\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: ${bodyBytes}\r\nConnection: close\r\n\r\n${CONNECT_NOT_SUPPORTED}`,
     );
     clientSocket.end();
+  });
+}
+
+// Marker we stash on a TLSSocket after a successful CONNECT so the inner HTTP
+// parser (tunnelServer, see attachHttpsConnect) can route requests to the
+// right upstream. One tunnel = one upstream host, even across keep-alive.
+interface ConnectTarget {
+  hostname: string;
+  port: number;
+}
+type TaggedTlsSocket = TLSSocket & { __flapwireTarget?: ConnectTarget };
+
+// Parses the CONNECT request-line path, which is always `host:port` per RFC 7231.
+function parseConnectTarget(raw: string | undefined): ConnectTarget | null {
+  if (!raw) return null;
+  const idx = raw.lastIndexOf(":");
+  if (idx < 0) return null;
+  const hostname = raw.slice(0, idx).replace(/^\[|\]$/g, "");
+  const port = Number.parseInt(raw.slice(idx + 1), 10);
+  if (!hostname || !Number.isFinite(port)) return null;
+  return { hostname, port };
+}
+
+// Terminates browser-side TLS for CONNECT tunnels and hands the decrypted
+// stream back to the same HTTP-level machinery we use for plaintext. Each
+// request inside the tunnel goes through handle() with `target.tls = true`,
+// so the three levers apply identically to HTTPS traffic.
+//
+// The CONNECT handshake itself is not degraded — latency and drops act on
+// requests, not on tunnel setup. A blackout does close the tunnel (both new
+// CONNECTs and existing ones, via the blackout reaper on the outer server).
+function attachHttpsConnect(
+  server: Server,
+  profile: ProxyProfile,
+  random: () => number,
+  log: (entry: RequestLog) => void,
+  now: () => number,
+  startedAt: number,
+  certStore: CertStore,
+  upstreamCa: string | undefined,
+): void {
+  // One internal HTTP server, never .listen()'d. Emitting `connection` on it
+  // with a TLSSocket uses its parser to pull HTTP/1.1 requests off the
+  // decrypted stream and hand them to this request handler.
+  const tunnelServer = createServer((req, res) => {
+    const target = (req.socket as TaggedTlsSocket).__flapwireTarget;
+    if (!target) {
+      res.writeHead(500).end();
+      return;
+    }
+    void handle(req, res, {
+      profile,
+      random,
+      log,
+      now,
+      startedAt,
+      upstreamCa,
+      resolveUpstream: () => ({
+        hostname: target.hostname,
+        port: target.port,
+        path: req.url ?? "/",
+        tls: true,
+      }),
+      logUrl: (r) => `https://${target.hostname}${r.url ?? ""}`,
+    });
+  });
+
+  server.on("connect", (req: IncomingMessage, clientSocket: Socket, head: Buffer) => {
+    const target = parseConnectTarget(req.url);
+    if (!target) {
+      clientSocket.destroy();
+      return;
+    }
+
+    // Refuse new tunnels during blackout. The outer reaper handles sockets
+    // that were already established.
+    const blackoutNow =
+      profile.blackout !== undefined && isInBlackout(profile.blackout, now() - startedAt);
+    if (blackoutNow) {
+      log({
+        method: "CONNECT",
+        url: `${target.hostname}:${target.port}`,
+        outcome: "blackout",
+        appliedLatencyMs: 0,
+      });
+      clientSocket.destroy();
+      return;
+    }
+
+    clientSocket.on("error", () => {});
+    clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+
+    // Any bytes that arrived on the wire before the tunnel was established
+    // belong to the TLS ClientHello — put them back in the socket's read
+    // buffer so TLSSocket sees them first.
+    if (head.length > 0) clientSocket.unshift(head);
+
+    const leaf = certStore.leafFor(target.hostname);
+    const tlsSocket = new TLSSocket(clientSocket, {
+      isServer: true,
+      cert: leaf.cert,
+      key: leaf.key,
+    }) as TaggedTlsSocket;
+    tlsSocket.__flapwireTarget = target;
+
+    tlsSocket.on("error", () => clientSocket.destroy());
+
+    tunnelServer.emit("connection", tlsSocket);
   });
 }
 
@@ -195,6 +323,7 @@ export function createProxy(profile: ProxyProfile, options: ProxyOptions = {}): 
       log,
       now,
       startedAt,
+      upstreamCa: options.upstreamCa,
       resolveUpstream: (r) => {
         const raw = r.url ?? "";
         try {
@@ -212,7 +341,20 @@ export function createProxy(profile: ProxyProfile, options: ProxyOptions = {}): 
     });
   });
 
-  rejectConnect(server);
+  if (options.certStore) {
+    attachHttpsConnect(
+      server,
+      profile,
+      random,
+      log,
+      now,
+      startedAt,
+      options.certStore,
+      options.upstreamCa,
+    );
+  } else {
+    rejectConnect(server);
+  }
   attachBlackoutReaper(server, profile, now, startedAt);
   return server;
 }
@@ -344,14 +486,16 @@ export function createReverseProxy(profile: ProxyProfile, options: ReverseProxyO
   const startedAt = now();
 
   const targetUrl = new URL(options.target);
+  const targetTls = targetUrl.protocol === "https:";
   const targetHost = targetUrl.hostname;
-  const targetPort = targetUrl.port ? Number(targetUrl.port) : 80;
+  const targetPort = targetUrl.port ? Number(targetUrl.port) : targetTls ? 443 : 80;
   const targetBasePath = targetUrl.pathname.replace(/\/$/, "");
 
   const resolveUpstream = (r: IncomingMessage): UpstreamTarget => ({
     hostname: targetHost,
     port: targetPort,
     path: `${targetBasePath}${r.url ?? "/"}`,
+    tls: targetTls,
   });
 
   const server = createServer((req, res) => {
@@ -361,6 +505,7 @@ export function createReverseProxy(profile: ProxyProfile, options: ReverseProxyO
       log,
       now,
       startedAt,
+      upstreamCa: options.upstreamCa,
       resolveUpstream,
       logUrl: (r) => r.url ?? "/",
     });
