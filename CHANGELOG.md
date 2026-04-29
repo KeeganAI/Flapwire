@@ -2,6 +2,22 @@
 
 All notable changes to Flapwire are recorded here. Hand-written.
 
+## [0.2.0] - 2026-04-23
+
+### Added
+- HTTPS support, both ways. Forward-proxied browsers can now CONNECT through Flapwire and reach HTTPS sites: the proxy answers 200, terminates TLS with a leaf cert it signed on the fly, and re-establishes TLS with the real upstream. Reverse mode accepts `--target https://...` and `--route 13000=https://...` and speaks TLS to the upstream directly. Either way, the same three levers apply identically — latency delays the request, drop turns into an RST, blackout tears the tunnel down.
+- `flapwire trust` subcommand. Installs the local CA in the OS trust store so HTTPS just works in the browser. macOS goes through `security add-trusted-cert`, Linux uses `update-ca-certificates` (Debian/Ubuntu) or `update-ca-trust` (Fedora/RHEL). Windows surfaces the `certutil` command for the user to paste into an elevated PowerShell. `flapwire trust --uninstall` reverses it. Sudo is invoked transparently when needed; the password prompt comes from sudo, not from us.
+- `upstreamCa` option on `createProxy` / `createReverseProxy` for trusting a self-signed upstream — handy when proxying to a local dev server that doesn't have a real cert.
+- `CONTRIBUTING.md`, plus issue templates for bug reports, feature requests, and new profiles. Profiles are still the easiest path for first-time contributions.
+
+### Changed
+- CI now runs on Windows too, alongside Linux and macOS. The trust-store paths are different enough between OSes that not testing them all is bugiardo.
+- Package and CLI descriptions now correctly say "HTTP/HTTPS proxy". The README's "HTTPS deferred to v0.2" line is gone.
+
+### Internals
+- New `cert` module signs a 10-year self-signed root CA on first use (persisted at `$XDG_CONFIG_HOME/flapwire/ca.pem` with the private key chmod 600), then signs leaf certs per hostname on demand and caches them in process memory.
+- New `trust` module abstracts the platform-specific trust-store calls behind a small runner interface, which keeps the unit tests honest without touching the real keychain.
+
 ## [0.1.6] - 2026-04-18
 
 ### Added
