@@ -1,10 +1,13 @@
 #!/usr/bin/env node
+import { spawnSync } from "node:child_process";
 import type { Server } from "node:http";
 import { Command } from "commander";
 import pc from "picocolors";
+import { type CertStore, createCertStore, loadCertStore } from "./cert.js";
 import { deriveConventionalPort, listenPreferred } from "./ports.js";
 import { PROFILE_NAMES, getProfile } from "./profiles.js";
 import { type ProxyProfile, type RequestLog, createProxy, createReverseProxy } from "./proxy.js";
+import { installTrust, uninstallTrust } from "./trust.js";
 
 function colorForStatus(status: number | undefined): (s: string) => string {
   if (status === undefined) return pc.red;
@@ -52,10 +55,11 @@ function parseRoute(raw: string): ParsedRoute {
   } catch {
     throw new Error(`invalid route target: ${raw}`);
   }
-  if (url.protocol !== "http:") {
-    throw new Error(`route target must be http://, got ${url.protocol}: ${raw}`);
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error(`route target must be http:// or https://, got ${url.protocol}: ${raw}`);
   }
-  const upstreamPort = url.port ? Number(url.port) : 80;
+  const isHttps = url.protocol === "https:";
+  const upstreamPort = url.port ? Number(url.port) : isHttps ? 443 : 80;
   let listenPort: number | null = null;
   if (listenSpec !== null && listenSpec !== "auto") {
     const n = Number(listenSpec);
@@ -84,11 +88,33 @@ function printProfileBanner(name: string, profile: ProxyProfile): void {
   }
 }
 
+// HTTPS support is opt-in by existence: if the user has run `flapwire trust`
+// (or we're writing the CA for the first time in that command), we have a
+// store on disk and MITM is enabled. Without it, CONNECT still returns 501
+// with a message pointing at the trust subcommand.
+function maybeLoadCertStore(): CertStore | undefined {
+  try {
+    return loadCertStore() ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function httpsBanner(store: CertStore | undefined): void {
+  if (store) {
+    console.log(pc.dim(`  https: on (CA at ${store.caPath})`));
+  } else {
+    console.log(pc.dim("  https: off (run `flapwire trust` to enable)"));
+  }
+}
+
 async function runForward(profile: ProxyProfile, profileName: string, port: number): Promise<void> {
-  const server = createProxy(profile, { log: (e) => console.log(formatLog(e)) });
+  const certStore = maybeLoadCertStore();
+  const server = createProxy(profile, { log: (e) => console.log(formatLog(e)), certStore });
   await new Promise<void>((r) => server.listen(port, () => r()));
   console.log(pc.dim(`flapwire listening on http://127.0.0.1:${port} (forward proxy)`));
   printProfileBanner(profileName, profile);
+  httpsBanner(certStore);
   console.log(pc.dim("use as an HTTP proxy, e.g.:"));
   console.log(pc.dim(`  curl -x http://127.0.0.1:${port} http://example.com/`));
   registerShutdown([server]);
@@ -101,7 +127,8 @@ async function runReverseSingle(
   explicitPort: number | null,
 ): Promise<void> {
   const targetUrl = new URL(target);
-  const upstreamPort = targetUrl.port ? Number(targetUrl.port) : 80;
+  const isHttps = targetUrl.protocol === "https:";
+  const upstreamPort = targetUrl.port ? Number(targetUrl.port) : isHttps ? 443 : 80;
   const preferred = explicitPort ?? deriveConventionalPort(upstreamPort);
   const server = createReverseProxy(profile, {
     target,
@@ -185,7 +212,7 @@ const program = new Command();
 
 program
   .name("flapwire")
-  .description("Local HTTP proxy that degrades traffic for resilience testing.")
+  .description("Local HTTP/HTTPS proxy that degrades traffic for resilience testing.")
   .option("-p, --profile <name>", `network profile (${PROFILE_NAMES.join(", ")})`, "slow-3g")
   .option("--port <number>", "port to listen on (forward / single reverse)")
   .option("--target <url>", "single reverse-proxy upstream (http://host:port)")
@@ -235,8 +262,8 @@ program
         // validate target
         try {
           const u = new URL(target);
-          if (u.protocol !== "http:") {
-            console.error(pc.red(`--target must be http://, got ${u.protocol}`));
+          if (u.protocol !== "http:" && u.protocol !== "https:") {
+            console.error(pc.red(`--target must be http:// or https://, got ${u.protocol}`));
             process.exit(1);
           }
         } catch {
@@ -260,6 +287,56 @@ program
       process.exit(1);
     }
   });
+
+// Re-runs the current flapwire invocation under sudo. Only called after we've
+// already decided we need to — the runner detects that non-interactively.
+// stdio inheritance lets sudo talk to the user's terminal for the password.
+function reexecElevated(): number {
+  const result = spawnSync("sudo", [process.execPath, ...process.argv.slice(1)], {
+    stdio: "inherit",
+  });
+  return result.status ?? 1;
+}
+
+async function cmdTrust(opts: { uninstall?: boolean }): Promise<void> {
+  // Ensure the CA exists on disk before we try to install it. Also fine to
+  // call during uninstall — it won't change anything that's already there.
+  const store = createCertStore();
+  console.log(pc.dim(`CA at ${store.caPath}`));
+
+  const action = opts.uninstall ? await uninstallTrust() : await installTrust(store.caPath);
+
+  if (action.action === "needs-elevation") {
+    if (action.platform === "win32") {
+      // UAC elevation from a Node child process is flaky. Show the command
+      // and let the user paste it into an elevated PowerShell.
+      console.error(pc.yellow(action.message));
+      console.error(pc.bold(`  ${action.commands[0] ?? ""}`));
+      process.exit(1);
+    }
+    console.log(pc.dim(action.message));
+    process.exit(reexecElevated());
+  }
+
+  if (action.action === "installed" || action.action === "uninstalled") {
+    console.log(pc.green(action.message));
+    return;
+  }
+
+  if (action.action === "already-present" || action.action === "already-absent") {
+    console.log(pc.dim(action.message));
+    return;
+  }
+
+  console.error(pc.red(action.message));
+  process.exit(1);
+}
+
+program
+  .command("trust")
+  .description("install Flapwire's local CA in the OS trust store so HTTPS works")
+  .option("--uninstall", "remove Flapwire's CA from the trust store instead")
+  .action((opts: { uninstall?: boolean }) => cmdTrust(opts));
 
 program.parseAsync(process.argv).catch((err) => {
   console.error(pc.red(err instanceof Error ? err.message : String(err)));

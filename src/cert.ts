@@ -30,6 +30,18 @@ export function resolveCertDir(env: NodeJS.ProcessEnv = process.env, home = home
   return join(home, ".config", "flapwire");
 }
 
+// Loads an existing store without creating one. Returns null when the CA
+// hasn't been generated yet — used by the CLI to decide whether to enable
+// MITM on startup (we don't want to silently generate a CA and ask the user
+// to trust it later).
+export function loadCertStore(options: CreateCertStoreOptions = {}): CertStore | null {
+  const dir = options.dir ?? resolveCertDir();
+  const caPath = join(dir, "ca.pem");
+  const caKeyPath = join(dir, "ca-key.pem");
+  if (!existsSync(caPath) || !existsSync(caKeyPath)) return null;
+  return createCertStore({ dir });
+}
+
 export function createCertStore(options: CreateCertStoreOptions = {}): CertStore {
   const dir = options.dir ?? resolveCertDir();
   mkdirSync(dir, { recursive: true, mode: 0o700 });

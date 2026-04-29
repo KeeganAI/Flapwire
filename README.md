@@ -1,6 +1,6 @@
 # Flapwire
 
-Local HTTP proxy that degrades traffic on purpose — jittered latency, random connection drops, periodic blackouts — so you can see what breaks before production does.
+Local HTTP/HTTPS proxy that degrades traffic on purpose — jittered latency, random connection drops, periodic blackouts — so you can see what breaks before production does.
 
 ## Forward proxy (classic)
 
@@ -12,7 +12,7 @@ curl -x http://127.0.0.1:8080 http://example.com/
 
 ## Reverse proxy
 
-Point your app at Flapwire instead of the upstream and it'll degrade on the way through — no browser proxy config, no `/etc/hosts`, no flags. Plain HTTP requests and WebSocket upgrades (e.g. Next.js / Vite HMR) are both forwarded, and the same levers apply to the WebSocket handshake.
+Point your app at Flapwire instead of the upstream and it'll degrade on the way through — no browser proxy config, no `/etc/hosts`, no flags. Plain HTTP requests and WebSocket upgrades (e.g. Next.js / Vite HMR) are both forwarded, and the same levers apply to the WebSocket handshake. Upstreams on `https://` work too.
 
 Single target:
 
@@ -75,6 +75,21 @@ flapwire [--profile <name>] [--port <number>] [--target <url>] [--route <PORT=UR
 
 If neither `--target` nor `--route` is given, Flapwire runs as a forward proxy (v0.1 behaviour).
 
+## HTTPS
+
+Flapwire can terminate TLS for both forward-proxied browsers (`CONNECT`) and reverse-proxy upstreams on `https://`. TLS termination needs a local CA that the OS trusts; set it up once with:
+
+```sh
+flapwire trust
+# sudo will prompt — the CA is written to ~/.config/flapwire/ca.pem and added to the system trust store
+```
+
+After that, run Flapwire normally. Forward mode: point your browser's HTTP(S) proxy at `127.0.0.1:8080` and visit an HTTPS site. Reverse mode: point `--target` or `--route` at an `https://` upstream.
+
+The CA is issued for "Flapwire Local CA" (10-year validity) and signs one leaf cert per hostname on demand. `flapwire trust --uninstall` removes it. The CA's private key never leaves your machine.
+
+Supported trust stores: macOS system keychain (via `security`), Linux with `update-ca-certificates` (Debian/Ubuntu) or `update-ca-trust` (Fedora/RHEL). On Windows, `flapwire trust` prints the `certutil` command to run in an elevated shell.
+
 ## Why not ...
 
 - **Chrome DevTools throttling** — lives in the browser, can't be scripted, applies a flat delay. Fine for one manual check; not usable in CI or for non-browser clients.
@@ -84,9 +99,7 @@ If neither `--target` nor `--route` is given, Flapwire runs as a forward proxy (
 
 ## Not in this release
 
-HTTPS is still not supported. `CONNECT` tunnels are rejected with `501 Not Implemented`; for HTTPS upstreams, wait for v0.2.
-
-No bandwidth throttling, external YAML profiles, admin API, UI, or CI helpers yet.
+No external YAML profiles, admin API, bandwidth throttling, failure injection, or CI helpers yet. A web UI and a CI integration are on the way in later milestones.
 
 ## License
 
