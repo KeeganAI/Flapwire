@@ -6,19 +6,21 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createCertStore, resolveCertDir } from "./cert.js";
 
 describe("resolveCertDir", () => {
+  // path.join uses the platform separator, so the expected values follow it
+  // — `/tmp/xdg/flapwire` on Unix, `\tmp\xdg\flapwire` on Windows.
   it("honours XDG_CONFIG_HOME when set", () => {
     const dir = resolveCertDir({ XDG_CONFIG_HOME: "/tmp/xdg" }, "/home/alice");
-    expect(dir).toBe("/tmp/xdg/flapwire");
+    expect(dir).toBe(join("/tmp/xdg", "flapwire"));
   });
 
   it("falls back to ~/.config/flapwire when XDG_CONFIG_HOME is unset", () => {
     const dir = resolveCertDir({}, "/home/alice");
-    expect(dir).toBe("/home/alice/.config/flapwire");
+    expect(dir).toBe(join("/home/alice", ".config", "flapwire"));
   });
 
   it("treats an empty XDG_CONFIG_HOME the same as unset", () => {
     const dir = resolveCertDir({ XDG_CONFIG_HOME: "" }, "/home/alice");
-    expect(dir).toBe("/home/alice/.config/flapwire");
+    expect(dir).toBe(join("/home/alice", ".config", "flapwire"));
   });
 });
 
