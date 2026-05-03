@@ -65,15 +65,40 @@ A lever with no configured value is simply inactive: no latency, no drops, or no
 ## Options
 
 ```sh
-flapwire [--profile <name>] [--port <number>] [--target <url>] [--route <PORT=URL> ...]
+flapwire [--profile <name>] [--port <number>] [--target <url>] [--route <PORT=URL> ...] [--config <path>]
 ```
 
 - `--profile`, `-p` — one of `fast-3g`, `slow-3g`, `flaky-wifi`, `train-wifi`. Default: `slow-3g`.
 - `--port` — port to listen on. Forward mode default is `8080`. In `--target` mode use an explicit number, or `auto` (or leave it off) to let Flapwire derive it from the upstream port.
 - `--target <url>` — single reverse-proxy upstream. Mutually exclusive with `--route`.
 - `--route <PORT=URL>` — repeatable; open one listen port per route, all sharing the same profile.
+- `--config <path>`, `-c` — path to a config file (default: `./flapwire.config.yaml` if present).
 
 If neither `--target` nor `--route` is given, Flapwire runs as a forward proxy (v0.1 behaviour).
+
+## Config file
+
+If `flapwire.config.yaml` exists in the current directory, Flapwire reads it on startup. CLI flags still work and override the file field by field — same convention as Vite, Next, Playwright.
+
+```yaml
+profile: flaky-wifi
+routes:
+  - listen: 13000
+    target: http://localhost:3000
+  - listen: 15173
+    target: https://localhost:5173
+upstreamCa: ./certs/dev-ca.pem  # optional; trusts a self-signed upstream
+```
+
+Single-target shape:
+
+```yaml
+profile: slow-3g
+target: http://localhost:3000
+port: 13000
+```
+
+Forward mode is the default — omit both `target` and `routes`.
 
 ## HTTPS
 

@@ -2,6 +2,14 @@
 
 All notable changes to Flapwire are recorded here. Hand-written.
 
+## [0.2.1] - 2026-05-03
+
+### Added
+- `flapwire.config.yaml` support. Drop a file in your project root (or point at one with `--config <path>`) and Flapwire reads `profile`, `port`, `target`, `routes`, and `upstreamCa` from it. CLI flags still work and override the file field by field — same convention as Vite, Next, Playwright. Schema is intentionally narrow for now; the admin API and failure-injection rules will extend it in the next two patches.
+
+### Internals
+- New `config` module with `parseConfig`, `loadConfig`, and `mergeOverrides`. CLI assembly is now: load file → layer CLI overrides → run.
+
 ## [0.2.0] - 2026-04-23
 
 ### Added

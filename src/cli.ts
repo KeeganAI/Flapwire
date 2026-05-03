@@ -4,6 +4,7 @@ import type { Server } from "node:http";
 import { Command } from "commander";
 import pc from "picocolors";
 import { type CertStore, createCertStore, loadCertStore } from "./cert.js";
+import { type FlapwireConfig, loadConfig, mergeOverrides } from "./config.js";
 import { deriveConventionalPort, listenPreferred } from "./ports.js";
 import { PROFILE_NAMES, getProfile } from "./profiles.js";
 import { type ProxyProfile, type RequestLog, createProxy, createReverseProxy } from "./proxy.js";
@@ -213,7 +214,7 @@ const program = new Command();
 program
   .name("flapwire")
   .description("Local HTTP/HTTPS proxy that degrades traffic for resilience testing.")
-  .option("-p, --profile <name>", `network profile (${PROFILE_NAMES.join(", ")})`, "slow-3g")
+  .option("-p, --profile <name>", `network profile (${PROFILE_NAMES.join(", ")})`)
   .option("--port <number>", "port to listen on (forward / single reverse)")
   .option("--target <url>", "single reverse-proxy upstream (http://host:port)")
   .option(
@@ -224,69 +225,115 @@ program
       return previous;
     },
   )
-  .action(async (opts: { profile: string; port?: string; target?: string; route?: string[] }) => {
-    let profile: ProxyProfile;
-    try {
-      profile = getProfile(opts.profile);
-    } catch (err) {
-      console.error(pc.red((err as Error).message));
-      process.exit(1);
-    }
-
-    const usingRoutes = (opts.route?.length ?? 0) > 0;
-    const usingTarget = typeof opts.target === "string" && opts.target.length > 0;
-
-    if (usingTarget && usingRoutes) {
-      console.error(pc.red("use either --target or --route, not both"));
-      process.exit(1);
-    }
-
-    try {
-      if (usingRoutes) {
-        const routes = (opts.route ?? []).map(parseRoute);
-        await runReverseRoutes(profile, opts.profile, routes);
-        return;
-      }
-
-      if (usingTarget) {
-        const target = opts.target as string;
-        let explicitPort: number | null = null;
-        if (opts.port && opts.port !== "auto") {
-          const n = Number.parseInt(opts.port, 10);
-          if (!Number.isFinite(n) || n <= 0 || n > 65535) {
-            console.error(pc.red(`invalid port: ${opts.port}`));
-            process.exit(1);
-          }
-          explicitPort = n;
-        }
-        // validate target
-        try {
-          const u = new URL(target);
-          if (u.protocol !== "http:" && u.protocol !== "https:") {
-            console.error(pc.red(`--target must be http:// or https://, got ${u.protocol}`));
-            process.exit(1);
-          }
-        } catch {
-          console.error(pc.red(`invalid --target URL: ${target}`));
-          process.exit(1);
-        }
-        await runReverseSingle(profile, opts.profile, target, explicitPort);
-        return;
-      }
-
-      // forward proxy (v0.1 behavior)
-      const portRaw = opts.port || "8080";
-      const port = Number.parseInt(portRaw, 10);
-      if (!Number.isFinite(port) || port <= 0 || port > 65535) {
-        console.error(pc.red(`invalid port: ${portRaw}`));
+  .option(
+    "-c, --config <path>",
+    "path to flapwire.config.yaml (default: ./flapwire.config.yaml if present)",
+  )
+  .action(
+    async (opts: {
+      profile?: string;
+      port?: string;
+      target?: string;
+      route?: string[];
+      config?: string;
+    }) => {
+      // Load config first (file is the source of truth), then layer CLI flags
+      // on top so explicit invocation always wins.
+      let fileConfig: FlapwireConfig | null;
+      try {
+        fileConfig = loadConfig(opts.config);
+      } catch (err) {
+        console.error(pc.red((err as Error).message));
         process.exit(1);
       }
-      await runForward(profile, opts.profile, port);
-    } catch (err) {
-      console.error(pc.red(err instanceof Error ? err.message : String(err)));
-      process.exit(1);
-    }
-  });
+
+      const cliPort = parsePortOption(opts.port);
+      const cliRoutes = (opts.route ?? []).map(parseRoute).map((r) => ({
+        target: r.target,
+        ...(r.listenPort !== null ? { listen: r.listenPort } : {}),
+      }));
+      const cliOverrides: Partial<FlapwireConfig> = {
+        ...(opts.profile ? { profile: opts.profile } : {}),
+        ...(cliPort !== null ? { port: cliPort } : {}),
+        ...(opts.target ? { target: opts.target } : {}),
+        ...(cliRoutes.length > 0 ? { routes: cliRoutes } : {}),
+      };
+
+      const cfg = mergeOverrides(fileConfig, cliOverrides);
+      const profileName = cfg.profile ?? "slow-3g";
+
+      let profile: ProxyProfile;
+      try {
+        profile = getProfile(profileName);
+      } catch (err) {
+        console.error(pc.red((err as Error).message));
+        process.exit(1);
+      }
+
+      const usingRoutes = (cfg.routes?.length ?? 0) > 0;
+      const usingTarget = typeof cfg.target === "string" && cfg.target.length > 0;
+
+      if (usingTarget && usingRoutes) {
+        console.error(pc.red("use either --target / target or --route / routes, not both"));
+        process.exit(1);
+      }
+
+      try {
+        if (usingRoutes) {
+          const routes: ParsedRoute[] = (cfg.routes ?? []).map((r) => ({
+            listenPort: r.listen ?? null,
+            target: r.target,
+            upstreamPort: upstreamPortOf(r.target),
+          }));
+          await runReverseRoutes(profile, profileName, routes);
+          return;
+        }
+
+        if (usingTarget) {
+          const target = cfg.target as string;
+          // Validate again — file values may have skipped CLI's URL check.
+          try {
+            const u = new URL(target);
+            if (u.protocol !== "http:" && u.protocol !== "https:") {
+              console.error(pc.red(`target must be http:// or https://, got ${u.protocol}`));
+              process.exit(1);
+            }
+          } catch {
+            console.error(pc.red(`invalid target URL: ${target}`));
+            process.exit(1);
+          }
+          await runReverseSingle(profile, profileName, target, cfg.port ?? null);
+          return;
+        }
+
+        // No routes, no target → forward proxy (v0.1 behavior).
+        const port = cfg.port ?? 8080;
+        if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+          console.error(pc.red(`invalid port: ${port}`));
+          process.exit(1);
+        }
+        await runForward(profile, profileName, port);
+      } catch (err) {
+        console.error(pc.red(err instanceof Error ? err.message : String(err)));
+        process.exit(1);
+      }
+    },
+  );
+
+function parsePortOption(raw: string | undefined): number | null {
+  if (!raw || raw === "auto") return null;
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isFinite(n) || n <= 0 || n > 65535) {
+    throw new Error(`invalid port: ${raw}`);
+  }
+  return n;
+}
+
+function upstreamPortOf(target: string): number {
+  const u = new URL(target);
+  if (u.port) return Number(u.port);
+  return u.protocol === "https:" ? 443 : 80;
+}
 
 // Re-runs the current flapwire invocation under sudo. Only called after we've
 // already decided we need to — the runner detects that non-interactively.

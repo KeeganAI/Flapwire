@@ -1,6 +1,6 @@
 {
   "name": "flapwire",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Local HTTP/HTTPS proxy that degrades traffic realistically for resilience testing.",
   "license": "MIT",
   "type": "module",
@@ -32,7 +32,8 @@
   "dependencies": {
     "commander": "^12.1.0",
     "node-forge": "^1.4.0",
-    "picocolors": "^1.1.1"
+    "picocolors": "^1.1.1",
+    "yaml": "^2.8.4"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",
