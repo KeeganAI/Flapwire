@@ -100,6 +100,31 @@ port: 13000
 
 Forward mode is the default — omit both `target` and `routes`.
 
+## Admin API
+
+Set `admin.port` in the config (or `--admin-port`) to expose a small control plane on `127.0.0.1`. No auth — it's a localhost-only dev tool. Useful for flipping state during a test run without restarting the proxy.
+
+```yaml
+admin:
+  port: 17070
+```
+
+```sh
+# switch profile live
+curl -X POST http://127.0.0.1:17070/admin/profile -d '{"name":"flaky-wifi"}'
+
+# force a 5-second blackout right now
+curl -X POST http://127.0.0.1:17070/admin/blackout -d '{"durationSeconds":5}'
+
+# make the next 3 requests fail with 503
+curl -X POST http://127.0.0.1:17070/admin/fail -d '{"status":503,"count":3}'
+
+# read current state
+curl http://127.0.0.1:17070/admin/status
+```
+
+In multi-route reverse mode, every change is fanned out to all routes at once.
+
 ## HTTPS
 
 Flapwire can terminate TLS for both forward-proxied browsers (`CONNECT`) and reverse-proxy upstreams on `https://`. TLS termination needs a local CA that the OS trusts; set it up once with:

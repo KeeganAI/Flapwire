@@ -12,6 +12,14 @@ export interface FlapwireConfig {
   target?: string;
   routes?: ConfigRoute[];
   upstreamCa?: string;
+  admin?: AdminConfig;
+}
+
+// Admin API control plane. Off by default — turn it on by setting `port` (or
+// passing `--admin-port`). Bound to 127.0.0.1 to keep the no-auth contract
+// honest; future versions may add `host` here for trusted private networks.
+export interface AdminConfig {
+  port?: number;
 }
 
 export interface ConfigRoute {
@@ -71,6 +79,21 @@ export function parseConfig(yaml: string): FlapwireConfig {
     if (typeof d.upstreamCa !== "string") throw new Error("`upstreamCa` must be a string");
     out.upstreamCa = d.upstreamCa;
   }
+  if ("admin" in d) {
+    if (d.admin === null || typeof d.admin !== "object" || Array.isArray(d.admin)) {
+      throw new Error("`admin` must be a mapping");
+    }
+    const a = d.admin as Record<string, unknown>;
+    const adminCfg: AdminConfig = {};
+    if ("port" in a) {
+      const n = a.port;
+      if (typeof n !== "number" || !Number.isInteger(n) || n <= 0 || n > 65535) {
+        throw new Error("`admin.port` must be an integer between 1 and 65535");
+      }
+      adminCfg.port = n;
+    }
+    out.admin = adminCfg;
+  }
 
   if (out.target && out.routes && out.routes.length > 0) {
     throw new Error("config sets both `target` and `routes` — pick one");
@@ -128,5 +151,6 @@ export function mergeOverrides(
     out.target = undefined;
   }
   if (overrides.upstreamCa !== undefined) out.upstreamCa = overrides.upstreamCa;
+  if (overrides.admin !== undefined) out.admin = { ...out.admin, ...overrides.admin };
   return out;
 }

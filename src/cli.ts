@@ -3,11 +3,18 @@ import { spawnSync } from "node:child_process";
 import type { Server } from "node:http";
 import { Command } from "commander";
 import pc from "picocolors";
+import { type AdminBinding, createAdminServer } from "./admin.js";
 import { type CertStore, createCertStore, loadCertStore } from "./cert.js";
 import { type FlapwireConfig, loadConfig, mergeOverrides } from "./config.js";
 import { deriveConventionalPort, listenPreferred } from "./ports.js";
 import { PROFILE_NAMES, getProfile } from "./profiles.js";
-import { type ProxyProfile, type RequestLog, createProxy, createReverseProxy } from "./proxy.js";
+import {
+  type FlapwireServer,
+  type ProxyProfile,
+  type RequestLog,
+  createProxy,
+  createReverseProxy,
+} from "./proxy.js";
 import { installTrust, uninstallTrust } from "./trust.js";
 
 function colorForStatus(status: number | undefined): (s: string) => string {
@@ -109,7 +116,11 @@ function httpsBanner(store: CertStore | undefined): void {
   }
 }
 
-async function runForward(profile: ProxyProfile, profileName: string, port: number): Promise<void> {
+async function runForward(
+  profile: ProxyProfile,
+  profileName: string,
+  port: number,
+): Promise<{ servers: FlapwireServer[]; bindings: AdminBinding[] }> {
   const certStore = maybeLoadCertStore();
   const server = createProxy(profile, { log: (e) => console.log(formatLog(e)), certStore });
   await new Promise<void>((r) => server.listen(port, () => r()));
@@ -118,7 +129,7 @@ async function runForward(profile: ProxyProfile, profileName: string, port: numb
   httpsBanner(certStore);
   console.log(pc.dim("use as an HTTP proxy, e.g.:"));
   console.log(pc.dim(`  curl -x http://127.0.0.1:${port} http://example.com/`));
-  registerShutdown([server]);
+  return { servers: [server], bindings: [{ label: `forward:${port}`, state: server.state }] };
 }
 
 async function runReverseSingle(
@@ -126,7 +137,7 @@ async function runReverseSingle(
   profileName: string,
   target: string,
   explicitPort: number | null,
-): Promise<void> {
+): Promise<{ servers: FlapwireServer[]; bindings: AdminBinding[] }> {
   const targetUrl = new URL(target);
   const isHttps = targetUrl.protocol === "https:";
   const upstreamPort = targetUrl.port ? Number(targetUrl.port) : isHttps ? 443 : 80;
@@ -143,16 +154,17 @@ async function runReverseSingle(
     );
   }
   printProfileBanner(profileName, profile);
-  registerShutdown([server]);
+  return { servers: [server], bindings: [{ label: target, state: server.state }] };
 }
 
 async function runReverseRoutes(
   profile: ProxyProfile,
   profileName: string,
   routes: ParsedRoute[],
-): Promise<void> {
+): Promise<{ servers: FlapwireServer[]; bindings: AdminBinding[] }> {
   const seen = new Set<number>();
-  const servers: Server[] = [];
+  const servers: FlapwireServer[] = [];
+  const bindings: AdminBinding[] = [];
   const mappings: { listen: number; target: string }[] = [];
   for (const r of routes) {
     const preferred = r.listenPort ?? deriveConventionalPort(r.upstreamPort);
@@ -165,6 +177,7 @@ async function runReverseRoutes(
     const { port, fallback } = await listenPreferred(server, effectivePreferred);
     seen.add(port);
     servers.push(server);
+    bindings.push({ label: `${port}=${r.target}`, state: server.state });
     mappings.push({ listen: port, target: r.target });
     if (fallback && preferred !== null && preferred !== port) {
       console.log(
@@ -183,7 +196,7 @@ async function runReverseRoutes(
     console.log(pc.dim(`  http://127.0.0.1:${m.listen} → ${m.target}`));
   }
   printProfileBanner(profileName, profile);
-  registerShutdown(servers);
+  return { servers, bindings };
 }
 
 function registerShutdown(servers: Server[]): void {
@@ -229,6 +242,10 @@ program
     "-c, --config <path>",
     "path to flapwire.config.yaml (default: ./flapwire.config.yaml if present)",
   )
+  .option(
+    "--admin-port <number>",
+    "start the admin API on this port (overrides admin.port in the config)",
+  )
   .action(
     async (opts: {
       profile?: string;
@@ -236,6 +253,7 @@ program
       target?: string;
       route?: string[];
       config?: string;
+      adminPort?: string;
     }) => {
       // Load config first (file is the source of truth), then layer CLI flags
       // on top so explicit invocation always wins.
@@ -248,6 +266,7 @@ program
       }
 
       const cliPort = parsePortOption(opts.port);
+      const cliAdminPort = parsePortOption(opts.adminPort);
       const cliRoutes = (opts.route ?? []).map(parseRoute).map((r) => ({
         target: r.target,
         ...(r.listenPort !== null ? { listen: r.listenPort } : {}),
@@ -257,6 +276,7 @@ program
         ...(cliPort !== null ? { port: cliPort } : {}),
         ...(opts.target ? { target: opts.target } : {}),
         ...(cliRoutes.length > 0 ? { routes: cliRoutes } : {}),
+        ...(cliAdminPort !== null ? { admin: { port: cliAdminPort } } : {}),
       };
 
       const cfg = mergeOverrides(fileConfig, cliOverrides);
@@ -279,17 +299,16 @@ program
       }
 
       try {
+        let started: { servers: FlapwireServer[]; bindings: AdminBinding[] };
+
         if (usingRoutes) {
           const routes: ParsedRoute[] = (cfg.routes ?? []).map((r) => ({
             listenPort: r.listen ?? null,
             target: r.target,
             upstreamPort: upstreamPortOf(r.target),
           }));
-          await runReverseRoutes(profile, profileName, routes);
-          return;
-        }
-
-        if (usingTarget) {
+          started = await runReverseRoutes(profile, profileName, routes);
+        } else if (usingTarget) {
           const target = cfg.target as string;
           // Validate again — file values may have skipped CLI's URL check.
           try {
@@ -302,17 +321,25 @@ program
             console.error(pc.red(`invalid target URL: ${target}`));
             process.exit(1);
           }
-          await runReverseSingle(profile, profileName, target, cfg.port ?? null);
-          return;
+          started = await runReverseSingle(profile, profileName, target, cfg.port ?? null);
+        } else {
+          // No routes, no target → forward proxy (v0.1 behavior).
+          const port = cfg.port ?? 8080;
+          if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+            console.error(pc.red(`invalid port: ${port}`));
+            process.exit(1);
+          }
+          started = await runForward(profile, profileName, port);
         }
 
-        // No routes, no target → forward proxy (v0.1 behavior).
-        const port = cfg.port ?? 8080;
-        if (!Number.isInteger(port) || port <= 0 || port > 65535) {
-          console.error(pc.red(`invalid port: ${port}`));
-          process.exit(1);
+        const allServers: Server[] = [...started.servers];
+        if (cfg.admin?.port) {
+          const admin = createAdminServer({ bindings: started.bindings });
+          await new Promise<void>((r) => admin.listen(cfg.admin?.port, "127.0.0.1", () => r()));
+          console.log(pc.dim(`admin api on http://127.0.0.1:${cfg.admin.port}`));
+          allServers.push(admin);
         }
-        await runForward(profile, profileName, port);
+        registerShutdown(allServers);
       } catch (err) {
         console.error(pc.red(err instanceof Error ? err.message : String(err)));
         process.exit(1);

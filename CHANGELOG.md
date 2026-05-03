@@ -2,6 +2,19 @@
 
 All notable changes to Flapwire are recorded here. Hand-written.
 
+## [0.2.2] - 2026-05-03
+
+### Added
+- Admin API. A separate HTTP server, off by default, that lets you flip the active profile, force a blackout window, or queue a one-shot failure on the running proxy without restarting it. Bind it with `--admin-port 17070` on the CLI or `admin: { port: 17070 }` in the config; it always listens on `127.0.0.1` (no auth — localhost is the trust boundary).
+  - `GET  /admin/status`
+  - `POST /admin/profile  { "name": "fast-3g" }`
+  - `POST /admin/blackout { "durationSeconds": 5 }`
+  - `POST /admin/fail     { "status": 503, "count": 3 }`
+  - In multi-route reverse mode, every proxy's state is updated together — one knob, all routes.
+
+### Internals
+- New `state` module holds the live profile, forced-blackout deadline, and pending failures behind one `ProxyState` object. `handle()`, the blackout reaper and the upgrade handler all read through it, so admin mutations apply mid-flight without restarting the proxy.
+
 ## [0.2.1] - 2026-05-03
 
 ### Added

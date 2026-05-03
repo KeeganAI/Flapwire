@@ -13,6 +13,7 @@ import type { CertStore } from "./cert.js";
 import { type BlackoutConfig, isInBlackout } from "./levers/blackout.js";
 import { type LatencyConfig, sampleLatencyMs } from "./levers/latency.js";
 import { type LossConfig, shouldDropConnection } from "./levers/loss.js";
+import { ProxyState } from "./state.js";
 
 export interface ProxyProfile {
   latency?: LatencyConfig;
@@ -42,6 +43,9 @@ export interface ProxyOptions {
   // Useful for dev setups whose upstream serves a self-signed cert. Adds to
   // the system trust store, doesn't replace it.
   upstreamCa?: string;
+  // Live state shared with the admin server, if any. Internal callers (CLI)
+  // pass one in; tests usually skip it and let createProxy build a fresh one.
+  state?: ProxyState;
 }
 
 export interface UpstreamTarget {
@@ -54,7 +58,7 @@ export interface UpstreamTarget {
 }
 
 interface HandlerDeps {
-  profile: ProxyProfile;
+  state: ProxyState;
   random: () => number;
   log: (entry: RequestLog) => void;
   now: () => number;
@@ -71,25 +75,28 @@ async function handle(
 ): Promise<void> {
   const method = clientReq.method ?? "GET";
   const url = deps.logUrl(clientReq);
+  const profile = deps.state.getProfile();
 
   // Drops happen before latency on purpose: a real packet-loss event is instant,
   // not "slow then vanish". The client sees an RST with no response at all.
-  if (deps.profile.loss && shouldDropConnection(deps.profile.loss, deps.random)) {
+  if (profile.loss && shouldDropConnection(profile.loss, deps.random)) {
     deps.log({ method, url, outcome: "drop", appliedLatencyMs: 0 });
     clientReq.socket.destroy();
     return;
   }
 
-  // Decide the blackout state up front. If we decided it again after the delay,
-  // a request that arrived just outside the window could still get a 504 because
-  // the window started while it was sleeping — honest but noisy.
-  const blackoutNow =
-    deps.profile.blackout !== undefined &&
-    isInBlackout(deps.profile.blackout, deps.now() - deps.startedAt);
+  // Decide the blackout state up front (covers both profile cycles and forced
+  // ones from the admin API). If we decided it again after the delay, a
+  // request that arrived just outside the window could still get a 504
+  // because the window started while it was sleeping — honest but noisy.
+  const nowMs = deps.now();
+  const blackoutNow = deps.state.isInBlackout(nowMs - deps.startedAt, nowMs);
 
-  const appliedLatencyMs = deps.profile.latency
-    ? sampleLatencyMs(deps.profile.latency, deps.random)
-    : 0;
+  // A queued failure (set by /admin/fail) intercepts the request before any
+  // upstream work — applied after latency so the client still feels the lag.
+  const queuedFailure = deps.state.consumeFailure();
+
+  const appliedLatencyMs = profile.latency ? sampleLatencyMs(profile.latency, deps.random) : 0;
   if (appliedLatencyMs > 0) {
     await delay(appliedLatencyMs);
   }
@@ -102,6 +109,15 @@ async function handle(
       clientRes.end("Gateway Timeout (blackout)\n");
     }
     deps.log({ method, url, outcome: "blackout", status: 504, appliedLatencyMs });
+    return;
+  }
+
+  if (queuedFailure) {
+    if (!clientRes.headersSent && !clientRes.socket?.destroyed) {
+      clientRes.writeHead(queuedFailure.status, { "Content-Type": "text/plain; charset=utf-8" });
+      clientRes.end(`Injected failure (${queuedFailure.status})\n`);
+    }
+    deps.log({ method, url, outcome: "error", status: queuedFailure.status, appliedLatencyMs });
     return;
   }
 
@@ -158,11 +174,12 @@ async function handle(
 // separately in handle() / attachUpgradeHandler.
 function attachBlackoutReaper(
   server: Server,
-  profile: ProxyProfile,
+  state: ProxyState,
   now: () => number,
   startedAt: number,
 ): void {
-  if (!profile.blackout) return;
+  // We always attach the reaper — even when no blackout is configured today
+  // the admin API can force one at runtime.
   const sockets = new Set<Socket>();
   server.on("connection", (s: Socket) => {
     sockets.add(s);
@@ -170,7 +187,8 @@ function attachBlackoutReaper(
   });
   let inBlackout = false;
   const tick = setInterval(() => {
-    const next = isInBlackout(profile.blackout as BlackoutConfig, now() - startedAt);
+    const nowMs = now();
+    const next = state.isInBlackout(nowMs - startedAt, nowMs);
     // Destroy sockets on the rising edge only — during a blackout we want to
     // ignore new connections rather than actively kill them here, since handle()
     // will answer them with a 504.
@@ -232,7 +250,7 @@ function parseConnectTarget(raw: string | undefined): ConnectTarget | null {
 // CONNECTs and existing ones, via the blackout reaper on the outer server).
 function attachHttpsConnect(
   server: Server,
-  profile: ProxyProfile,
+  state: ProxyState,
   random: () => number,
   log: (entry: RequestLog) => void,
   now: () => number,
@@ -250,7 +268,7 @@ function attachHttpsConnect(
       return;
     }
     void handle(req, res, {
-      profile,
+      state,
       random,
       log,
       now,
@@ -275,8 +293,8 @@ function attachHttpsConnect(
 
     // Refuse new tunnels during blackout. The outer reaper handles sockets
     // that were already established.
-    const blackoutNow =
-      profile.blackout !== undefined && isInBlackout(profile.blackout, now() - startedAt);
+    const nowMs = now();
+    const blackoutNow = state.isInBlackout(nowMs - startedAt, nowMs);
     if (blackoutNow) {
       log({
         method: "CONNECT",
@@ -310,15 +328,21 @@ function attachHttpsConnect(
   });
 }
 
-export function createProxy(profile: ProxyProfile, options: ProxyOptions = {}): Server {
+// Mutable state attached to the returned server, so the CLI (and the admin
+// API) can switch profiles, force blackouts, etc. at runtime without owning
+// a separate channel.
+export type FlapwireServer = Server & { state: ProxyState };
+
+export function createProxy(profile: ProxyProfile, options: ProxyOptions = {}): FlapwireServer {
   const random = options.random ?? Math.random;
   const log = options.log ?? (() => {});
   const now = options.now ?? Date.now;
   const startedAt = now();
+  const state = options.state ?? new ProxyState(profile);
 
   const server = createServer((req, res) => {
     void handle(req, res, {
-      profile,
+      state,
       random,
       log,
       now,
@@ -339,12 +363,13 @@ export function createProxy(profile: ProxyProfile, options: ProxyOptions = {}): 
       },
       logUrl: (r) => r.url ?? "",
     });
-  });
+  }) as FlapwireServer;
+  server.state = state;
 
   if (options.certStore) {
     attachHttpsConnect(
       server,
-      profile,
+      state,
       random,
       log,
       now,
@@ -355,7 +380,7 @@ export function createProxy(profile: ProxyProfile, options: ProxyOptions = {}): 
   } else {
     rejectConnect(server);
   }
-  attachBlackoutReaper(server, profile, now, startedAt);
+  attachBlackoutReaper(server, state, now, startedAt);
   return server;
 }
 
@@ -370,7 +395,7 @@ export interface ReverseProxyOptions extends ProxyOptions {
 // Connection: Upgrade is in flight, so a TCP close is the only honest signal).
 function attachUpgradeHandler(
   server: Server,
-  profile: ProxyProfile,
+  state: ProxyState,
   random: () => number,
   log: (entry: RequestLog) => void,
   now: () => number,
@@ -393,6 +418,7 @@ function attachUpgradeHandler(
   server.on("upgrade", (clientReq: IncomingMessage, clientSocket: Socket, head: Buffer) => {
     const method = clientReq.method ?? "GET";
     const url = logUrl(clientReq);
+    const profile = state.getProfile();
 
     if (profile.loss && shouldDropConnection(profile.loss, random)) {
       log({ method, url, outcome: "drop", appliedLatencyMs: 0 });
@@ -401,8 +427,8 @@ function attachUpgradeHandler(
     }
 
     // Decide blackout state up front — see the matching note in handle().
-    const blackoutNow =
-      profile.blackout !== undefined && isInBlackout(profile.blackout, now() - startedAt);
+    const nowMs = now();
+    const blackoutNow = state.isInBlackout(nowMs - startedAt, nowMs);
 
     const appliedLatencyMs = profile.latency ? sampleLatencyMs(profile.latency, random) : 0;
 
@@ -479,11 +505,15 @@ function attachUpgradeHandler(
   });
 }
 
-export function createReverseProxy(profile: ProxyProfile, options: ReverseProxyOptions): Server {
+export function createReverseProxy(
+  profile: ProxyProfile,
+  options: ReverseProxyOptions,
+): FlapwireServer {
   const random = options.random ?? Math.random;
   const log = options.log ?? (() => {});
   const now = options.now ?? Date.now;
   const startedAt = now();
+  const state = options.state ?? new ProxyState(profile);
 
   const targetUrl = new URL(options.target);
   const targetTls = targetUrl.protocol === "https:";
@@ -500,7 +530,7 @@ export function createReverseProxy(profile: ProxyProfile, options: ReverseProxyO
 
   const server = createServer((req, res) => {
     void handle(req, res, {
-      profile,
+      state,
       random,
       log,
       now,
@@ -509,12 +539,13 @@ export function createReverseProxy(profile: ProxyProfile, options: ReverseProxyO
       resolveUpstream,
       logUrl: (r) => r.url ?? "/",
     });
-  });
+  }) as FlapwireServer;
+  server.state = state;
 
-  attachBlackoutReaper(server, profile, now, startedAt);
+  attachBlackoutReaper(server, state, now, startedAt);
   attachUpgradeHandler(
     server,
-    profile,
+    state,
     random,
     log,
     now,

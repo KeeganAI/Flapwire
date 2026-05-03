@@ -64,6 +64,19 @@ routes:
     expect(() => parseConfig("routes:\n  - listen: 13000\n")).toThrow(/routes\[0\]\.target/);
   });
 
+  it("parses admin.port", () => {
+    const cfg = parseConfig("admin:\n  port: 17070\n");
+    expect(cfg.admin).toEqual({ port: 17070 });
+  });
+
+  it("rejects admin that isn't a mapping", () => {
+    expect(() => parseConfig("admin: 17070")).toThrow(/admin/);
+  });
+
+  it("rejects bad admin.port", () => {
+    expect(() => parseConfig("admin:\n  port: 70000\n")).toThrow(/admin\.port/);
+  });
+
   it("rejects mixing target and routes (the CLI rejects it too)", () => {
     expect(() =>
       parseConfig(`
