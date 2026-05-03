@@ -237,6 +237,28 @@ describe("createProxy (CONNECT tunneling)", () => {
     expect(hit?.url).toBe("https://127.0.0.1/api");
   });
 
+  it("drops the request inside the tunnel when the loss lever fires", async () => {
+    const upstreamPort = await startHttpsUpstream((_req, res) => res.end("never"));
+    const logs: RequestLog[] = [];
+    const proxyPort = await startProxy(
+      { loss: { connectionDropRate: 1 } },
+      { log: (e) => logs.push(e) },
+    );
+
+    // The drop fires inside handle(), which destroys the TLS socket. The
+    // tunnel returns no data — body 0/empty, no exception. The truth is in
+    // the log: a "drop" outcome on the GET that went through.
+    const r = await httpsThroughProxy({
+      proxyPort,
+      target: `127.0.0.1:${upstreamPort}`,
+      path: "/",
+      trustCa: certStore.ca.cert,
+    }).catch(() => ({ status: 0, body: "", rawHead: "" }));
+
+    expect(r.status).toBe(0);
+    expect(logs.some((l) => l.method === "GET" && l.outcome === "drop")).toBe(true);
+  });
+
   it("closes the CONNECT socket when blackout is active", async () => {
     const upstreamPort = await startHttpsUpstream((_req, res) => res.end("ok"));
     let clock = 0;
