@@ -125,6 +125,33 @@ curl http://127.0.0.1:17070/admin/status
 
 In multi-route reverse mode, every change is fanned out to all routes at once.
 
+## Failure injection
+
+Make Flapwire short-circuit specific requests with an HTTP error or a timeout — useful for verifying that retry, fallback, and timeout-handling paths actually work.
+
+```yaml
+failures:
+  - path: "^/api/checkout"
+    method: POST
+    sample: 0.1           # 10% of matching requests
+    status: 503
+  - path: "^/api/slow"
+    timeout: true         # hold the socket open; client times itself out
+```
+
+Rules match in order — first hit wins. The `path` field is treated as a case-insensitive regex; `method` and `sample` are optional. Exactly one of `status` or `timeout` must be set.
+
+You can also push rules at runtime through the admin API:
+
+```sh
+curl -X POST http://127.0.0.1:17070/admin/failures \
+  -d '{"rules":[{"path":"^/api/payment","status":504}]}'
+
+curl http://127.0.0.1:17070/admin/failures
+```
+
+`POST /admin/failures` replaces the live rule list; `GET /admin/failures` reads it back.
+
 ## HTTPS
 
 Flapwire can terminate TLS for both forward-proxied browsers (`CONNECT`) and reverse-proxy upstreams on `https://`. TLS termination needs a local CA that the OS trusts; set it up once with:
@@ -149,7 +176,7 @@ Supported trust stores: macOS system keychain (via `security`), Linux with `upda
 
 ## Not in this release
 
-No external YAML profiles, admin API, bandwidth throttling, failure injection, or CI helpers yet. A web UI and a CI integration are on the way in later milestones.
+No bandwidth throttling, external community profiles, or CI helpers yet. A web UI and a CI integration are on the way in later milestones.
 
 ## License
 

@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
+import { type FailureRule, parseRules } from "./failures.js";
 
 // One file describes everything Flapwire needs to start. Mirrors the existing
 // CLI surface so a config is just "the same flags, persisted" — nothing more
@@ -13,6 +14,7 @@ export interface FlapwireConfig {
   routes?: ConfigRoute[];
   upstreamCa?: string;
   admin?: AdminConfig;
+  failures?: FailureRule[];
 }
 
 // Admin API control plane. Off by default — turn it on by setting `port` (or
@@ -78,6 +80,9 @@ export function parseConfig(yaml: string): FlapwireConfig {
   if ("upstreamCa" in d) {
     if (typeof d.upstreamCa !== "string") throw new Error("`upstreamCa` must be a string");
     out.upstreamCa = d.upstreamCa;
+  }
+  if ("failures" in d) {
+    out.failures = parseRules(d.failures);
   }
   if ("admin" in d) {
     if (d.admin === null || typeof d.admin !== "object" || Array.isArray(d.admin)) {
@@ -152,5 +157,6 @@ export function mergeOverrides(
   }
   if (overrides.upstreamCa !== undefined) out.upstreamCa = overrides.upstreamCa;
   if (overrides.admin !== undefined) out.admin = { ...out.admin, ...overrides.admin };
+  if (overrides.failures !== undefined) out.failures = overrides.failures;
   return out;
 }

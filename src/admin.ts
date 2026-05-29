@@ -1,4 +1,5 @@
 import { type IncomingMessage, type Server, type ServerResponse, createServer } from "node:http";
+import { parseRules } from "./failures.js";
 import { getProfile } from "./profiles.js";
 import type { ProxyState } from "./state.js";
 
@@ -11,6 +12,8 @@ import type { ProxyState } from "./state.js";
 //   POST /admin/profile  → { name: "fast-3g" }            switches profile
 //   POST /admin/blackout → { durationSeconds: 5 }         forces a blackout
 //   POST /admin/fail     → { status: 503, count: 3 }      queues N failures
+//   GET  /admin/failures → { rules: [...] }                returns current rules
+//   POST /admin/failures → { rules: [...] }                replaces rule list
 //
 // Mutations are fan-out: every binding gets the same change. That keeps
 // multi-route setups behaving as one logical proxy.
@@ -84,6 +87,26 @@ export function createAdminServer(options: AdminOptions): Server {
       }
       for (const b of bindings) b.state.queueFailure(status, count);
       return jsonOk(res, { status, count, applied: bindings.length });
+    }
+
+    if (method === "GET" && url === "/admin/failures") {
+      // First binding's rules are authoritative — they're kept in sync by the
+      // POST handler below, so any binding's view is the same as any other's.
+      const rules = bindings[0]?.state.getRules() ?? [];
+      return jsonOk(res, { rules });
+    }
+
+    if (method === "POST" && url === "/admin/failures") {
+      const body = await readJson(req).catch((e) => e as Error);
+      if (body instanceof Error) return jsonError(res, 400, body.message);
+      const raw = (body as { rules?: unknown }).rules;
+      try {
+        const parsed = parseRules(raw);
+        for (const b of bindings) b.state.setRules(parsed);
+        return jsonOk(res, { rules: parsed, applied: bindings.length });
+      } catch (err) {
+        return jsonError(res, 400, (err as Error).message);
+      }
     }
 
     return jsonError(res, 404, `unknown admin route: ${method} ${url}`);

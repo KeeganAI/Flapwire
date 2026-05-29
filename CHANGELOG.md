@@ -2,6 +2,15 @@
 
 All notable changes to Flapwire are recorded here. Hand-written.
 
+## [0.2.3] - 2026-05-29
+
+### Added
+- Failure-injection rules. Declare them in `flapwire.config.yaml` under `failures:`, or push them at runtime to `POST /admin/failures`. Each rule matches on `path` (regex), `method`, and an optional `sample` (0-1 probability), and the action is either a `status` (immediate HTTP error) or `timeout: true` (hold the socket open — client times itself out). The first matching rule wins.
+- `GET /admin/failures` returns the live rule list; `POST /admin/failures { rules: [...] }` replaces it across every binding.
+
+### Internals
+- New `failures` module with `parseRules`, `compileRules`, and `matchRule` — kept in its own file because the validation surface is large and worth testing on its own. `ProxyState` holds the compiled rules; `handle()` walks them after blackout / one-shot fail and before reaching the upstream.
+
 ## [0.2.2] - 2026-05-03
 
 ### Added

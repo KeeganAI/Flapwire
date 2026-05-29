@@ -332,6 +332,17 @@ program
           started = await runForward(profile, profileName, port);
         }
 
+        // Apply failure-injection rules from the config to every binding.
+        // The admin API can replace this list at runtime via /admin/failures.
+        if (cfg.failures && cfg.failures.length > 0) {
+          for (const b of started.bindings) b.state.setRules(cfg.failures);
+          console.log(
+            pc.dim(
+              `  failures: ${cfg.failures.length} rule${cfg.failures.length === 1 ? "" : "s"}`,
+            ),
+          );
+        }
+
         const allServers: Server[] = [...started.servers];
         if (cfg.admin?.port) {
           const admin = createAdminServer({ bindings: started.bindings });

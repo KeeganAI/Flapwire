@@ -1,3 +1,10 @@
+import {
+  type CompiledRule,
+  type FailureRule,
+  type MatchedAction,
+  compileRules,
+  matchRule,
+} from "./failures.js";
 import { type BlackoutConfig, isInBlackout } from "./levers/blackout.js";
 import type { ProxyProfile } from "./proxy.js";
 
@@ -18,6 +25,11 @@ export class ProxyState {
   // Epoch ms when a manually-forced blackout ends. Zero (or past) means none.
   private forcedBlackoutUntilMs = 0;
   private failure: PendingFailure | null = null;
+  // Rule-based failure injection (0.2.3). Independent of the one-shot
+  // `failure` field above: rules apply continuously, the one-shot is a manual
+  // trigger from /admin/fail that runs out after N hits.
+  private rules: FailureRule[] = [];
+  private compiledRules: CompiledRule[] = [];
 
   constructor(initial: ProxyProfile) {
     this.profile = initial;
@@ -70,16 +82,35 @@ export class ProxyState {
     return out;
   }
 
+  setRules(rules: FailureRule[]): void {
+    this.rules = rules;
+    this.compiledRules = compileRules(rules);
+  }
+
+  getRules(): FailureRule[] {
+    return this.rules;
+  }
+
+  // Walks the rules in declared order and returns the first match's action,
+  // or null. `random` is the same RNG used for loss sampling, so tests can
+  // pin both together.
+  matchFailureRule(method: string, path: string, random: () => number): MatchedAction | null {
+    if (this.compiledRules.length === 0) return null;
+    return matchRule(this.compiledRules, method, path, random);
+  }
+
   snapshot(): {
     profile: ProxyProfile;
     forcedBlackoutMsRemaining: number;
     pendingFailure: PendingFailure | null;
+    rules: FailureRule[];
   } {
     const now = Date.now();
     return {
       profile: this.profile,
       forcedBlackoutMsRemaining: Math.max(0, this.forcedBlackoutUntilMs - now),
       pendingFailure: this.failure ? { ...this.failure } : null,
+      rules: this.rules,
     };
   }
 }

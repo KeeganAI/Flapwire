@@ -92,9 +92,13 @@ async function handle(
   const nowMs = deps.now();
   const blackoutNow = deps.state.isInBlackout(nowMs - deps.startedAt, nowMs);
 
-  // A queued failure (set by /admin/fail) intercepts the request before any
-  // upstream work — applied after latency so the client still feels the lag.
+  // Both flavours of injected failure decide their action up front — before
+  // latency — so the response is driven by the request as it arrived. Sample
+  // and rule walk happen now even though we apply the action after the delay.
   const queuedFailure = deps.state.consumeFailure();
+  const ruleAction = queuedFailure
+    ? null
+    : deps.state.matchFailureRule(method, requestPathFor(clientReq), deps.random);
 
   const appliedLatencyMs = profile.latency ? sampleLatencyMs(profile.latency, deps.random) : 0;
   if (appliedLatencyMs > 0) {
@@ -118,6 +122,23 @@ async function handle(
       clientRes.end(`Injected failure (${queuedFailure.status})\n`);
     }
     deps.log({ method, url, outcome: "error", status: queuedFailure.status, appliedLatencyMs });
+    return;
+  }
+
+  if (ruleAction) {
+    if (ruleAction.timeout) {
+      // Hold the socket open — client will time itself out. No log "end"
+      // marker; the request stays in flight until the client gives up or the
+      // server is closed (closeAllConnections at shutdown).
+      deps.log({ method, url, outcome: "error", appliedLatencyMs });
+      return;
+    }
+    const status = ruleAction.status ?? 500;
+    if (!clientRes.headersSent && !clientRes.socket?.destroyed) {
+      clientRes.writeHead(status, { "Content-Type": "text/plain; charset=utf-8" });
+      clientRes.end(`Injected failure (${status})\n`);
+    }
+    deps.log({ method, url, outcome: "error", status, appliedLatencyMs });
     return;
   }
 
@@ -166,6 +187,20 @@ async function handle(
     deps.log({ method, url, outcome: "error", status: 502, appliedLatencyMs });
   });
   clientReq.pipe(upstreamReq);
+}
+
+// For forward-proxy plaintext, the request URL is an absolute URL. For reverse
+// mode and tunnelled HTTPS, it's already a path. Failure rules match on the
+// path component only — what the upstream would see — so we normalise here.
+function requestPathFor(req: IncomingMessage): string {
+  const raw = req.url ?? "/";
+  if (raw.startsWith("/")) return raw;
+  try {
+    const u = new URL(raw);
+    return `${u.pathname}${u.search}`;
+  } catch {
+    return raw;
+  }
 }
 
 // Tears existing connections down at the moment a blackout window starts, so

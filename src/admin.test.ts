@@ -134,6 +134,28 @@ describe("admin server", () => {
     expect(r.status).toBe(400);
   });
 
+  it("POST /admin/failures replaces the rule list and GET reads it back", async () => {
+    const state = new ProxyState({});
+    const port = await start(state);
+    const rules = [{ path: "^/api", method: "POST", status: 503 }];
+    const setR = await call(port, "POST", "/admin/failures", { rules });
+    expect(setR.status).toBe(200);
+    expect((setR.body as { rules: unknown[] }).rules).toEqual(rules);
+
+    const getR = await call(port, "GET", "/admin/failures");
+    expect(getR.status).toBe(200);
+    expect((getR.body as { rules: unknown[] }).rules).toEqual(rules);
+    expect(state.getRules()).toEqual(rules);
+  });
+
+  it("POST /admin/failures with an invalid rule returns 400", async () => {
+    const state = new ProxyState({});
+    const port = await start(state);
+    const r = await call(port, "POST", "/admin/failures", { rules: [{ path: "^/x" }] });
+    expect(r.status).toBe(400);
+    expect((r.body as { error: string }).error).toMatch(/status.*timeout/);
+  });
+
   it("unknown routes return 404 JSON", async () => {
     const state = new ProxyState({});
     const port = await start(state);

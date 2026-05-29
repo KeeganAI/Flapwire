@@ -244,6 +244,44 @@ describe("createProxy", () => {
     expect(logs[0]?.outcome).toBe("blackout");
   });
 
+  it("intercepts matching requests with the configured status when a failure rule fires", async () => {
+    const upstreamPort = await startUpstream((req, res) => {
+      // Upstream is expected to be reached only for non-matching paths.
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.end(`hit ${req.url}`);
+    });
+    const logs: RequestLog[] = [];
+    const proxyPort = await startProxy({}, { log: (e) => logs.push(e) });
+
+    // Reach the live state attached to the server we just started so we can
+    // install rules without going through the admin server.
+    const proxyServer = (await import("./proxy.js")).createProxy(
+      {},
+      {
+        log: (e) => logs.push(e),
+      },
+    );
+    proxyServer.state.setRules([{ path: "^/admin", status: 503 }]);
+    const port = await listenRandom(proxyServer);
+    closers.push(() => new Promise<void>((r) => proxyServer.close(() => r())));
+
+    const blocked = await requestThroughProxy(port, `http://127.0.0.1:${upstreamPort}/admin/users`);
+    expect(blocked.status).toBe(503);
+    expect(blocked.body).toMatch(/Injected failure/);
+
+    const passed = await requestThroughProxy(port, `http://127.0.0.1:${upstreamPort}/home`);
+    expect(passed.status).toBe(200);
+    expect(passed.body).toBe("hit /home");
+
+    // The other proxy on this test has no rules — leave it alone, just verify
+    // we didn't accidentally share state across proxies.
+    const other = await requestThroughProxy(
+      proxyPort,
+      `http://127.0.0.1:${upstreamPort}/admin/users`,
+    );
+    expect(other.status).toBe(200);
+  });
+
   it("passes through when the blackout window is not active", async () => {
     const upstreamPort = await startUpstream((_req, res) => {
       res.writeHead(200);
